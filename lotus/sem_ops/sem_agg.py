@@ -143,6 +143,11 @@ class SemAggDataframe:
     def _validate(obj: Any) -> None:
         pass
 
+    @staticmethod
+    def process_group(args):
+        group, user_instruction, all_cols, suffix, progress_bar_desc = args
+        return group.sem_agg(user_instruction, all_cols, suffix, None, progress_bar_desc=progress_bar_desc)
+
     def __call__(
         self,
         user_instruction: str,
@@ -181,19 +186,14 @@ class SemAggDataframe:
             if column not in self._obj.columns:
                 raise ValueError(f"column {column} not found in DataFrame. Given usr instruction: {user_instruction}")
 
-       
-
-
         if group_by:
             grouped = self._obj.groupby(group_by)
-            new_df = pd.DataFrame()
-            for name, group in grouped:
-                res = group.sem_agg(user_instruction, all_cols, suffix, None, progress_bar_desc=progress_bar_desc)
-                new_df = pd.concat([new_df, res])
-            return new_df
-        
-        
-            
+            group_args = [(group, user_instruction, all_cols, suffix, progress_bar_desc) for _, group in grouped]
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=lotus.settings.parallel_groupby_max_threads) as executor:
+                return pd.concat(list(executor.map(SemAggDataframe.process_group, group_args)))
+
         # Sort df by partition_id if it exists
         if "_lotus_partition_id" in self._obj.columns:
             self._obj = self._obj.sort_values(by="_lotus_partition_id")
