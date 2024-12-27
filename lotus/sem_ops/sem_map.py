@@ -3,6 +3,7 @@ from typing import Any, Callable
 import pandas as pd
 
 import lotus
+from lotus.cache import operator_cache
 from lotus.templates import task_instructions
 from lotus.types import LMOutput, SemanticMapOutput, SemanticMapPostprocessOutput
 from lotus.utils import show_safe_mode
@@ -80,6 +81,7 @@ class SemMapDataframe:
         if not isinstance(obj, pd.DataFrame):
             raise AttributeError("Must be a DataFrame")
 
+    @operator_cache
     def __call__(
         self,
         user_instruction: str,

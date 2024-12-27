@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 
 import lotus
+from lotus.cache import operator_cache
 
 
 @pd.api.extensions.register_dataframe_accessor("sem_cluster_by")
@@ -19,6 +20,7 @@ class SemClusterByDataframe:
         if not isinstance(obj, pd.DataFrame):
             raise AttributeError("Must be a DataFrame")
 
+    @operator_cache
     def __call__(
         self,
         col_name: str,
@@ -52,7 +54,7 @@ class SemClusterByDataframe:
         self._obj["cluster_id"] = pd.Series(indices, index=self._obj.index)
         # if return_scores:
         #     self._obj["centroid_sim_score"] = pd.Series(scores, index=self._obj.index)
-        
+
         # if return_centroids:
         #     return self._obj, centroids
         # else:

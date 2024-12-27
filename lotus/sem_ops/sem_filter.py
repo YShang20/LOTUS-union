@@ -5,6 +5,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 import lotus
+from lotus.cache import operator_cache
 from lotus.templates import task_instructions
 from lotus.types import CascadeArgs, LMOutput, LogprobsForFilterCascade, SemanticFilterOutput
 from lotus.utils import show_safe_mode
@@ -134,6 +135,7 @@ class SemFilterDataframe:
         if not isinstance(obj, pd.DataFrame):
             raise AttributeError("Must be a DataFrame")
 
+    @operator_cache
     def __call__(
         self,
         user_instruction: str,

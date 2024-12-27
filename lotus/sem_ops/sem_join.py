@@ -4,6 +4,7 @@ import pandas as pd
 from tqdm import tqdm
 
 import lotus
+from lotus.cache import operator_cache
 from lotus.templates import task_instructions
 from lotus.types import CascadeArgs, SemanticJoinOutput
 from lotus.utils import show_safe_mode
@@ -234,7 +235,6 @@ def sem_join_cascade(
             cot_reasoning=cot_reasoning,
             default=default,
             strategy=strategy,
-            show_progress_bar=False,
         )
         pbar.update(num_large)
         pbar.close()
@@ -545,6 +545,7 @@ class SemJoinDataframe:
         if not isinstance(obj, pd.DataFrame):
             raise AttributeError("Must be a DataFrame")
 
+    @operator_cache
     def __call__(
         self,
         other: pd.DataFrame | pd.Series,

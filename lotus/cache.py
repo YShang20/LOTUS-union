@@ -1,3 +1,5 @@
+import hashlib
+import json
 import os
 import pickle
 import sqlite3
@@ -8,6 +10,8 @@ from enum import Enum
 from functools import wraps
 from typing import Any, Callable
 
+import pandas as pd
+
 import lotus
 
 
@@ -16,8 +20,47 @@ def require_cache_enabled(func: Callable) -> Callable:
 
     @wraps(func)
     def wrapper(self, *args, **kwargs):
-        if not lotus.settings.enable_cache:
+        if not lotus.settings.enable_message_cache:
             return None
+        return func(self, *args, **kwargs)
+
+    return wrapper
+
+
+def operator_cache(func: Callable) -> Callable:
+    """Decorator to add operator level caching."""
+
+    @wraps(func)
+    def wrapper(self, *args, **kwargs):
+        model = lotus.settings.lm
+        use_operator_cache = lotus.settings.enable_operator_cache
+
+        if use_operator_cache and model.cache:
+
+            def serialize(value):
+                if isinstance(value, pd.DataFrame):
+                    return value.to_json()
+                elif hasattr(value, "dict"):
+                    return value.dict()
+                return value
+
+            serialized_kwargs = {key: serialize(value) for key, value in kwargs.items()}
+            serialized_args = [serialize(arg) for arg in args]
+            cache_key = hashlib.sha256(
+                json.dumps({"args": serialized_args, "kwargs": serialized_kwargs}, sort_keys=True).encode()
+            ).hexdigest()
+
+            cached_result = model.cache.get(cache_key)
+            if cached_result is not None:
+                lotus.logger.debug(f"Cache hit for {cache_key}")
+                model.stats.total_usage.operator_cache_hits += 1
+                return cached_result
+            lotus.logger.debug(f"Cache miss for {cache_key}")
+
+            result = func(self, *args, **kwargs)
+            model.cache.insert(cache_key, result)
+            return result
+
         return func(self, *args, **kwargs)
 
     return wrapper

@@ -3,6 +3,7 @@ from typing import Any
 import pandas as pd
 
 import lotus.models
+from lotus.cache import operator_cache
 from lotus.templates import task_instructions
 from lotus.types import LMOutput, SemanticAggOutput
 
@@ -148,6 +149,7 @@ class SemAggDataframe:
         group, user_instruction, all_cols, suffix, progress_bar_desc = args
         return group.sem_agg(user_instruction, all_cols, suffix, None, progress_bar_desc=progress_bar_desc)
 
+    @operator_cache
     def __call__(
         self,
         user_instruction: str,
