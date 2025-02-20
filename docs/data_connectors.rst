@@ -3,14 +3,11 @@ data_connectors
 
 Overview
 ---------
-LOTUS provides additional methods to load your data if your data is not originally in a pandas df format.
-Current data connections include most SQL databases supported by SQLalchemy and any s3 serivice.
+LOTUS' data connectors let you seamlessly load data from external stores (e.g. a SQL database) so that you can run LOTUS programs over them.
+Current data connections include most SQL databases supported by SQLAlchemy and any S3 serivice.
 
-Motivation
------------
-Data connectors offer additional ways to import data to be used by LOTUS's semantic Operators
 
-DB Example
+Example: Loading from SQLite
 -----------
 .. code-block:: python
 
@@ -41,7 +38,7 @@ Output:
 +----+--------------+-------------------+----------+----------------+-----------------------------------------------------+
 
 
-s3 Example
+Example: Loading from S3
 -----------
 .. code-block:: python
 
