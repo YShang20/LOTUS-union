@@ -67,3 +67,11 @@ LOTUS implements the semantic operator programming model and provides an optimiz
    configurations
    data_connectors
 
+
+.. toctree::
+   :hidden:
+   :maxdepth: 1
+   :caption: Data Connectors
+
+   data_connectors
+
