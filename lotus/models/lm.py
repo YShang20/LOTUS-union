@@ -13,7 +13,14 @@ from tqdm import tqdm
 
 import lotus
 from lotus.cache import CacheFactory
-from lotus.types import LMOutput, LMStats, LogprobsForCascade, LogprobsForFilterCascade
+from lotus.types import (
+    LMOutput,
+    LMStats,
+    LogprobsForCascade,
+    LogprobsForFilterCascade,
+    LotusUsageLimitException,
+    UsageLimit,
+)
 
 logging.getLogger("LiteLLM").setLevel(logging.CRITICAL)
 logging.getLogger("httpx").setLevel(logging.CRITICAL)
@@ -29,8 +36,22 @@ class LM:
         max_batch_size: int = 64,
         tokenizer: Tokenizer | None = None,
         cache=None,
+        usage_limit: UsageLimit = UsageLimit(),
         **kwargs: dict[str, Any],
     ):
+        """Language Model class for interacting with various LLM providers.
+
+        Args:
+            model (str): Name of the model to use. Defaults to "gpt-4o-mini".
+            temperature (float): Sampling temperature. Defaults to 0.0.
+            max_ctx_len (int): Maximum context length in tokens. Defaults to 128000.
+            max_tokens (int): Maximum number of tokens to generate. Defaults to 512.
+            max_batch_size (int): Maximum batch size for concurrent requests. Defaults to 64.
+            tokenizer (Tokenizer | None): Custom tokenizer instance. Defaults to None.
+            cache: Cache instance to use. Defaults to None.
+            usage_limit (UsageLimit): Usage limits for the model. Defaults to UsageLimit().
+            **kwargs: Additional keyword arguments passed to the underlying LLM API.
+        """
         self.model = model
         self.max_ctx_len = max_ctx_len
         self.max_tokens = max_tokens
@@ -39,6 +60,7 @@ class LM:
         self.kwargs = dict(temperature=temperature, max_tokens=max_tokens, **kwargs)
 
         self.stats: LMStats = LMStats()
+        self.usage_limit = usage_limit
 
         self.cache = cache or CacheFactory.create_default_cache()
 
@@ -72,9 +94,11 @@ class LM:
         uncached_responses = self._process_uncached_messages(
             uncached_data, all_kwargs, show_progress_bar, progress_bar_desc
         )
-        if lotus.settings.enable_cache:
-            # Add new responses to cache
-            for resp, (_, hash) in zip(uncached_responses, uncached_data):
+
+        # Add new responses to cache and update stats
+        for resp, (_, hash) in zip(uncached_responses, uncached_data):
+            self._update_stats(resp)
+            if lotus.settings.enable_cache:
                 self._cache_response(resp, hash)
 
         # Merge all responses in original order and extract outputs
@@ -115,7 +139,6 @@ class LM:
         """Caches a response and updates stats if successful."""
         if isinstance(response, OpenAIError):
             raise response
-        self._update_stats(response)
         self.cache.insert(hash, response)
 
     def _hash_messages(self, messages: list[dict[str, str]], kwargs: dict[str, Any]) -> str:
@@ -137,6 +160,17 @@ class LM:
         self.stats.total_usage.prompt_tokens += response.usage.prompt_tokens
         self.stats.total_usage.completion_tokens += response.usage.completion_tokens
         self.stats.total_usage.total_tokens += response.usage.total_tokens
+
+        # Check if any usage limits are exceeded
+        if (
+            self.stats.total_usage.prompt_tokens > self.usage_limit.prompt_tokens_limit
+            or self.stats.total_usage.completion_tokens > self.usage_limit.completion_tokens_limit
+            or self.stats.total_usage.total_tokens > self.usage_limit.total_tokens_limit
+            or self.stats.total_usage.total_cost > self.usage_limit.total_cost_limit
+        ):
+            raise LotusUsageLimitException(
+                f"Usage limit exceeded. Current usage: {self.stats.total_usage}, Limit: {self.usage_limit}"
+            )
 
         try:
             self.stats.total_usage.total_cost += completion_cost(completion_response=response)
