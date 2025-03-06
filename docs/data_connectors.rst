@@ -9,6 +9,12 @@ Current data connections include SQL databases supported by `SQLAlchemy`_ and an
 
 .. _SQLAlchemy: https://docs.sqlalchemy.org/en/14/dialects/
 
+Intstallation
+--------
+To get started, you will need to install the lotus submodule as follows::
+
+    pip install lotus[data_connectors]
+
 
 Example: Loading from SQLite
 -----------

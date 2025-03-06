@@ -16,11 +16,11 @@ Supported File Types
 - Text-based files (`.txt`, `.py`, `.md`, etc.): `per_page` mode is not supported for such files.
 
 Intstallation
-To get started, you will need to install the lotus submodule as follows:
--------------
-.. code-block:: shell
+--------
+To get started, you will need to install the lotus submodule as follows::
 
     pip install lotus[file_extractor]
+    
 
 PDF Example
 --------
