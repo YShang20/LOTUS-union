@@ -11,7 +11,7 @@
 [#license-gh-package]: https://lbesson.mit-license.org/
 [#arxiv-paper-package]: https://arxiv.org/abs/2407.11418
 [#pypi-package]: https://pypi.org/project/lotus-ai/
-[#slack]: https://join.slack.com/t/lotus-fnm8919/shared_invite/zt-2tnq6948j-juGuSIR0__fsh~kUmZ6TJw
+[#slack]: https://join.slack.com/t/lotus-fnm8919/shared_invite/zt-319k232lx-nEcLF~5w274dcQLmw2Wqyg
 <!--- BADGES: END --->
 
 LOTUS makes LLM-powered data processing fast and easy. 
