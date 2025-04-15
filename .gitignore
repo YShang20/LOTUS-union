@@ -9,3 +9,4 @@ docs/_build
 .pytest_cache
 .env
 tests/knn3_amazon_L6_l2_0.4.csv
+tests/knn3_amazon_L6_l2_0.4.csv
