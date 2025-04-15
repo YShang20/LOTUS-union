@@ -23,15 +23,20 @@ rm = SentenceTransformersRM(model="intfloat/e5-base-v2")
 # df_right = df[right_cols].rename(columns=lambda x: x.replace('rtable.', ''))
 # df_left = df.iloc[:150]
 # df_right = df.iloc[150:]
-# # 2. Merge them and keep track of the 'source'
-df_left = pd.read_csv('Amazon-GoogleProducts/Amazon.csv', encoding='ISO-8859-1',quotechar='"', escapechar='\\')
-df_right = pd.read_csv('Amazon-GoogleProducts/GoogleProducts.csv', encoding='ISO-8859-1',quotechar='"', escapechar='\\')
+# # # 2. Merge them and keep track of the 'source'
+# df_left = pd.read_csv('Amazon-GoogleProducts/Amazon.csv', encoding='ISO-8859-1',quotechar='"', escapechar='\\')
+# df_right = pd.read_csv('Amazon-GoogleProducts/GoogleProducts.csv', encoding='ISO-8859-1',quotechar='"', escapechar='\\')
+
+df_left = pd.read_csv('/Users/yolandazhou/Documents/untitled_folder/CSE_584/lotus-584/tests/msd_only.csv',quotechar='"', escapechar='\\')
+df_right = pd.read_csv('/Users/yolandazhou/Documents/untitled_folder/CSE_584/lotus-584/tests/mxm_only.csv',  quotechar='"', escapechar='\\')
+
 df_left['source'] = 'left'
 df_right['source'] = 'right'
 
 # 3. Perform index-based grouping
 df_right = df_right.rename(columns={'name': 'title'})
 use_columns = [  'title', 'description', 'manufacturer', 'price']
+use_columns = [  'lyrics']
 #use_columns = ["author","date","description","length","price","publisher","title"]
 final_df = find_semantic_groups(
     table1=df_left,
@@ -49,14 +54,14 @@ print(len(final_df))
 final_df.to_csv("tests/knn3_amazon_L6_l2_0.4.csv", index=False)
 
 
-ground_truth_df = pd.read_csv("processed_result_3290.csv")  
+ground_truth_df = pd.read_csv("processed_results_230k.csv")  
 
 # Extract record_ids
 # ground_truth_ids = set(ground_truth_df['record_id'])
 # retrieved_ids = set(final_df['record_id'])
 
-ground_truth_ids = set(ground_truth_df['id'])
-retrieved_ids = set(final_df['id'])
+ground_truth_ids = set(ground_truth_df['unified_id'])
+retrieved_ids = set(final_df['track_id'])
 
 # Compute how many ground truth records are correctly retrieved
 true_positives = ground_truth_ids.intersection(retrieved_ids)
