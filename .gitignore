@@ -8,3 +8,4 @@ docs/_build
 .mypy_cache
 .pytest_cache
 .env
+knn3_amazon_L6_l2_0.4.csv
