@@ -158,12 +158,110 @@ def find_semantic_groups(
     rep_rows = [df_stacked.iloc[idx].copy() for idx in rep_indices]
     return pd.DataFrame(rep_rows)
 
+# Create a function to build a similarity matrix from embeddings
+def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_stacked=False):
+    """
+    Build a similarity matrix where each entry (i,j) is the similarity score between row i and row j.
+    
+    Parameters:
+    - table1, table2: DataFrames to compare
+    - columns: Columns to use for comparison
+    - rm: Retrieval model for embedding
+    - full_matrix: If True, compute the full n×n matrix; if False, only compute nearest neighbors 
+                  (more memory efficient)
+    - is_stacked: If True, assumes table1 is already the stacked result of the two tables
+                 and table2 is ignored.
+    
+    Returns:
+    - similarity_matrix: n×n numpy array of similarity scores
+    - df_stacked: The combined DataFrame
+    """
+    # Step 1: Combine tables and create text representation
+    if not is_stacked:
+        df_stacked = pd.concat([table1, table2], ignore_index=True)
+    else:
+        df_stacked = table1  # Already stacked
+        
+    n_rows = len(df_stacked)
+    
+    # Create text representation for each row
+    df_result = df_stacked.apply(
+        lambda row: " ".join([str(row[col]) for col in columns if pd.notna(row[col])]), 
+        axis=1
+    ).tolist()
+    
+    
+    # Step 2: Embed the texts
+    embeddings = rm._embed(df_result)
+    
+    # Step 3: Build HNSW index for efficient similarity computation
+    index = build_hnsw_index(embeddings, space='l2', ef_construction=500, M=64)
+    
+    # Step 4: Create the similarity matrix
+    if full_matrix:
+        similarity_matrix = np.zeros((n_rows, n_rows))
+        
+        try:
+            # Try to query each point against all others with large k value
+            labels, distances = index.knn_query(embeddings, k=n_rows)
+            
+            # Fill the similarity matrix
+            for i in range(n_rows):
+                for j_idx, j in enumerate(labels[i]):
+                    # Use 1 - distance as similarity score (since lower distance means higher similarity)
+                    if i == j:
+                        similarity_matrix[i, j] = 0
+                    else:
+                        similarity_matrix[i, j] = 1.0 - min(1.0, distances[i][j_idx])
+        except RuntimeError as e:
+            # Fallback to pairwise cosine similarity if KNN fails
+            print("KNN query failed. Falling back to pairwise cosine similarity calculation.")
+            
+            # Normalize embeddings for cosine similarity
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            normalized_embeddings = embeddings / norms
+            
+            # Compute pairwise cosine similarity
+            similarity_matrix = np.dot(normalized_embeddings, normalized_embeddings.T)
+            
+            # Set diagonal to zero (no self-matches)
+            np.fill_diagonal(similarity_matrix, 0)
+    else:
+        # Use a sparse approach - only compute for k nearest neighbors
+        k = min(50, n_rows-1)  # Set a reasonable k value
+        similarity_matrix = np.zeros((n_rows, n_rows))
+        
+        try:
+            # Query the index for top-k nearest neighbors for each point
+            labels, distances = index.knn_query(embeddings, k=k)
+            
+            # Fill the similarity matrix with known values
+            for i in range(n_rows):
+                for j_idx, j in enumerate(labels[i]):
+                    # Convert distance to similarity score (1 - distance) and clip to [0,1]
+                    similarity_matrix[i, j] = 1.0 - min(1.0, distances[i][j_idx])
+        except RuntimeError as e:
+            # Fallback to pairwise cosine similarity if KNN fails
+            print("KNN query failed. Falling back to pairwise cosine similarity calculation.")
+            
+            # Normalize embeddings for cosine similarity
+            norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
+            normalized_embeddings = embeddings / norms
+            
+            # Compute pairwise cosine similarity
+            similarity_matrix = np.dot(normalized_embeddings, normalized_embeddings.T)
+            
+            # Set diagonal to zero (no self-matches)
+            np.fill_diagonal(similarity_matrix, 0)
+    
+    return similarity_matrix, df_stacked
 
 def exact_match(
     table1: pd.DataFrame,
     table2: pd.DataFrame,
     columns1: List[str] = None,
     columns2: List[str] = None,
+    is_stacked: bool = False,
 ) -> np.ndarray:
     """
     Implements an efficient exact-match algorithm using sort-merge join approach.
@@ -173,6 +271,8 @@ def exact_match(
         table2 (pd.DataFrame): Second table to compare
         columns1 (List[str]): Columns from table1 to use for matching. If None, all columns are used.
         columns2 (List[str]): Columns from table2 to use for matching. If None, uses columns1.
+        is_stacked (bool): If True, assumes table1 is already the stacked result of the two tables
+                          and table2 is ignored.
     
     Returns:
         np.ndarray: An nxn boolean matrix where n is the total number of rows in the combined tables.
@@ -189,13 +289,22 @@ def exact_match(
     for col in columns1:
         if col not in table1.columns:
             raise ValueError(f"Column '{col}' not found in table1")
-    for col in columns2:
-        if col not in table2.columns:
-            raise ValueError(f"Column '{col}' not found in table2")
     
-    # Stack the tables
-    df_stacked = pd.concat([table1, table2], ignore_index=True)
-
+    if not is_stacked:
+        for col in columns2:
+            if col not in table2.columns:
+                raise ValueError(f"Column '{col}' not found in table2")
+        
+        # Stack the tables
+        df_stacked = pd.concat([table1, table2], ignore_index=True)
+        n_rows_t1 = len(table1)
+    else:
+        # If already stacked, just use table1
+        df_stacked = table1
+        # In stacked mode, we assume the first half is from the first table
+        # This is a simplification that works if both tables have the same length
+        # For the general case, we would need to pass n_rows_t1 as a parameter
+        n_rows_t1 = len(table1) // 2
     
     # Create concatenated strings for sorting
     if len(columns1) == len(columns2):
@@ -203,7 +312,7 @@ def exact_match(
         concat_values = []
         for idx, row in df_stacked.iterrows():
             # Determine which set of columns to use based on whether the row came from table1 or table2
-            cols = columns1 if idx < len(table1) else columns2
+            cols = columns1 if idx < n_rows_t1 else columns2
             # Convert row values to strings and concatenate
             row_str = "|".join(str(row[col]) for col in cols)
             concat_values.append(row_str)
@@ -212,12 +321,12 @@ def exact_match(
     else:
         # If column lengths don't match, we need a different approach
         # For table1 rows, use columns1
-        for idx in range(len(table1)):
+        for idx in range(n_rows_t1):
             row = df_stacked.iloc[idx]
             df_stacked.at[idx, '_concat_key'] = "|".join(str(row[col]) for col in columns1)
         
         # For table2 rows, use columns2
-        for idx in range(len(table1), len(df_stacked)):
+        for idx in range(n_rows_t1, len(df_stacked)):
             row = df_stacked.iloc[idx]
             df_stacked.at[idx, '_concat_key'] = "|".join(str(row[col]) for col in columns2)
     
@@ -247,12 +356,16 @@ def exact_match(
     # Ensure diagonal is 0 (no self-matches)
     np.fill_diagonal(result_matrix, 0)
     
+    # Delete the temporary concat key column
+    if '_concat_key' in df_stacked.columns:
+        df_stacked.drop('_concat_key', axis=1, inplace=True)
+    
     return result_matrix
 
 
 #----
 
-def sem_union(
+def llm_union(
     table1: pd.DataFrame,
     table2: pd.DataFrame,
     columns1: List[str],
@@ -269,7 +382,7 @@ def sem_union(
     additional_cot_instructions: str = "",
 ) -> pd.DataFrame:
     """
-    Implements the sem_union operator by comparing selected columns between two tables.
+    Implements the semantic union operator using LLM for all row comparisons.
     
     For each row in table1 and each row in table2, a document is created (containing the two rows' values)
     and passed to the LLM using a union_formatter with the provided user_instruction.
@@ -350,11 +463,11 @@ def sem_union(
         progress_bar_desc=progress_bar_desc,
         **kwargs
     )
-    print(lm_output.outputs)
+    
     # Postprocess outputs using the same postprocessor as sem_filter.
     postprocess_output: SemanticFilterOutput = filter_postprocess(lm_output.outputs, default=False)
     outputs_bool: List[bool] = postprocess_output.outputs  # Expecting a list of booleans ("True" -> True, "False" -> False)
-    print(outputs_bool)
+    
     # Build match lists for table1 and table2.
     n_rows_t1 = table1.shape[0]
     n_rows_t2 = table1.shape[0]  # Since they're the same table
@@ -366,20 +479,14 @@ def sem_union(
             i, j = mapping[idx]
             matches_t1[i].append(j)
             matches_t2[j].append(i)
-    print(matches_t2)
-    print(matches_t1)
-    # matches_t2 = [[], [2, 440], [1, 441], [], [443], [], [445], [446], [9], [8, 33, 448], [449], [], [35, 36], [32], [], [], [], [18, 19, 456], [], [458], [50, 51, 52, 53, 54, 459], [50, 51, 52, 53, 54], [50, 51, 52, 53, 54, 461], [50, 51, 52, 53, 54, 462], [469], [30, 464], [30], [28, 29], [29], [28], [466], [], [], [], [], [], [], [476], [], [], [479], [480], [505], [73, 74, 75, 487], [73, 74, 75], [], [], [482, 486], [482, 486], [], [], [], [], [], [], [], [86, 87], [496], [497], [498], [], [491], [92, 93, 94], [92, 93, 94], [503], [504], [], [], [514], [508], [509], [510], [], [], [511], [], [], [516], [], [], [], [], [], [], [523], [], [525], [117, 118, 119, 120, 121, 122], [117, 118, 119, 120, 121, 122], [117, 118, 119, 120, 121, 122], [117, 118, 119, 120, 121, 122], [117, 118, 119, 120, 121, 122, 536], [530, 532, 533], [], [], [], [], [], [128, 129], [], [136, 539, 540], [539, 540], [451], [451], [135, 136, 451], [135, 136], [], [], [547], [139, 140], [], [141, 142, 143, 550], [141, 142, 143, 551], [551], [553], [554], [], [], [], [], [559], [151, 152], [], [562], [562], [], [], [], [], [], [], [162, 163, 570], [], [], [], [], [577], [], [579], [580], [172, 173, 581], [], [583], [584], [585], [587], [587], [588], [187], [186], [], [], [], [], [], [193, 194, 195, 196, 197], [193, 194, 195, 196, 197], [193, 194, 195, 196, 197, 598], [193, 194, 195, 196, 197], [], [601], [602], [602], [], [202, 203], [], [], [608], [], [], [], [612], [210, 211], [], [], [616], [], [], [], [620], [621], [622], [], [], [], [], [675], [628], [629, 630], [630], [631], [229], [526], [], [210, 211, 635], [635], [637], [235, 236], [639], [640], [], [], [643], [], [], [646], [], [], [], [], [248, 249, 250, 251], [248, 249, 250, 251], [248, 249, 250, 251, 653], [], [655], [656, 713], [657], [], [], [], [], [259, 260, 662], [], [], [], [], [], [], [266, 267, 268, 269, 270, 271, 673], [266, 267, 268, 269, 270, 271, 674], [266, 267, 268, 269, 270, 271, 676], [266, 267, 268, 269, 270, 271, 676, 677], [266, 267, 268, 269, 270, 271, 678, 787], [], [767], [690, 709, 767], [690, 709], [275, 276, 683], [684], [], [686], [], [], [281, 282, 689], [], [], [], [], [], [287, 288], [], [702], [290, 291, 292, 293, 294, 698, 702], [290, 291, 292, 293, 294], [290, 291, 292, 293, 294, 697, 701], [290, 291, 292, 293, 294, 701], [701], [], [], [297, 298, 705], [682, 704], [659], [300, 301, 302], [300, 301, 302], [], [303, 304, 641], [], [], [], [307, 308, 715], [716, 718], [309, 310, 311, 312, 717], [309, 310, 311, 312, 716, 718], [309, 310, 311, 312], [], [721], [722], [], [318, 724], [316, 725], [], [], [], [586], [731], [], [], [734], [326, 327, 328, 736], [326, 327, 328, 736], [737], [], [739], [740], [665], [665, 742], [335, 336, 743], [], [], [], [], [747, 748], [749], [], [], [344, 345], [], [], [], [], [757], [350, 351, 352, 353, 354, 355, 356], [350, 351, 352, 353, 354, 355, 356, 759], [350, 351, 352, 353, 354, 355, 356], [350, 351, 352, 353, 354, 355, 356, 761], [350, 351, 352, 353, 354, 355, 356], [350, 351, 352, 353, 354, 355, 356, 763], [], [765], [766], [], [121], [], [], [122], [], [], [774], [367, 368, 369, 370, 371], [367, 368, 369, 370, 371], [367, 368, 369, 370, 371], [367, 368, 369, 370, 371], [], [], [], [], [], [], [], [783], [680], [380, 381, 382], [380, 381, 382], [790], [425], [384, 385, 792], [793], [794], [], [], [], [], [799], [], [], [], [703], [], [], [], [], [], [473], [436], [], [], [], [], [409], [407], [], [], [], [], [], [], [], [], [], [], [], [727], [], [], [], [], [383], [596], [], [], [703], [], [735], [], [], [], [402], [], [597, 710], [], [521], [], [], [3], [], [], [7], [668], [9], [], [40], [34, 41, 517], [12], [13, 43], [], [15, 45, 542], [46], [], [48], [20, 49], [21], [22, 141, 142, 143], [23], [], [], [], [56], [], [58], [59], [], [61], [], [], [64, 401, 613], [687], [69], [], [], [63], [], [], [], [], [], [], [76], [], [], [79], [80], [], [86, 87], [], [], [], [], [82], [], [688], [], [100], [], [], [], [], [96], [97], [98], [], [], [], [], [103], [104, 735], [81, 708], [], [], [108, 450], [109, 595], [110, 597], [113, 541, 675], [439], [], [107], [631], [116], [], [231], [], [], [532, 533], [530], [123, 530, 532, 533], [], [125], [], [694, 712], [], [], [131, 539, 540, 595], [136, 520], [131], [131, 454], [], [134, 135, 136], [130], [], [138], [139, 140], [139, 140], [], [], [], [], [], [], [147], [], [], [150], [151, 152], [], [153, 154], [], [], [], [], [159], [], [], [162, 163], [578], [], [], [], [], [], [573], [], [724], [], [756], [], [], [], [179], [180], [324], [184, 186, 187, 727], [183, 188, 735], [708], [], [], [], [], [520, 541], [428], [439, 521], [], [198], [], [], [201], [202, 203], [], [], [205], [], [], [208], [], [], [], [212, 475], [], [], [], [], [], [], [], [220], [], [222], [], [675], [], [629, 630], [], [228], [], [229, 230, 526], [231], [], [645, 682, 704], [], [235, 236], [], [], [], [239], [240, 796], [306, 636], [], [243, 706], [], [], [246], [], [], [], [], [697, 701], [], [253, 798], [], [255], [256, 736], [257], [728], [300, 301], [751], [], [], [], [335, 336], [], [], [452], [], [], [], [783], [631], [273], [274, 526, 704], [231], [275, 276], [277], [278, 641], [386], [], [767], [306, 709, 780], [770, 795], [284], [711], [286, 481, 712], [505], [], [289, 701, 746], [281, 282, 702], [], [697], [543, 659, 698, 746], [], [682], [81], [300, 301], [297, 298, 659], [735], [690, 767], [300, 301, 302, 641], [297, 402, 436, 693], [651, 694], [306], [305], [], [], [718], [281, 282, 444, 716], [], [543], [], [], [], [], [316, 318], [317, 750], [316, 318], [], [], [321, 586, 667], [322], [], [324, 596], [325], [428, 708], [], [], [], [331], [], [], [334, 665], [], [335, 336], [337], [702], [339, 698, 747, 748], [340], [726], [342], [343], [], [669], [], [297, 298, 348, 782], [348], [349], [], [], [], [], [589], [], [], [357], [], [359], [690, 709], [], [795], [363, 692, 775], [], [365], [366, 771], [], [281, 282], [], [], [], [], [691, 755], [374], [], [680], [], [378], [], [], [], [], [386], [], [384, 385], [770], [], [279, 692], [], [390], [], [392], [393], [649], [], [662], [], [], [262, 399], [], [], [], [402], [], [], [], [], [407], [407], [], [410], [411], [412], [], [], [], [], [], [], [419], [420], [421], [422], [], [], [], [], [], [], [], [430], [], [], [433], [], [], [], [437]]
-    # matches_t1 = [[], [2], [1], [403], [], [], [], [406], [9], [8, 408], [], [], [412], [413], [], [415], [], [], [17], [17], [419], [420], [421], [422], [], [], [], [], [27, 29], [27, 28], [25, 26], [], [13], [9], [411], [12], [12], [], [], [], [410], [411], [], [413], [], [415], [416], [], [418], [419], [20, 21, 22, 23], [20, 21, 22, 23], [20, 21, 22, 23], [20, 21, 22, 23], [20, 21, 22, 23], [], [426], [], [428], [429], [], [431], [], [439], [434], [], [], [], [], [436], [], [], [], [43, 44], [43, 44], [43, 44], [446], [], [], [449], [450], [475, 658], [457], [], [], [], [56, 452], [56, 452], [], [], [], [], [62, 63], [62, 63], [62, 63], [], [466], [467], [468], [], [461], [], [], [473], [474], [], [], [484], [478], [479], [480], [], [], [481], [], [], [486], [87, 88, 89, 90, 91], [87, 88, 89, 90, 91], [87, 88, 89, 90, 91], [87, 88, 89, 90, 91], [87, 88, 89, 90, 91, 321], [87, 88, 89, 90, 91, 324], [493], [], [495], [], [], [98], [98], [506], [500, 502, 503], [], [], [505], [104, 105, 505], [100, 104, 105, 501, 505], [], [508], [109, 509, 510], [109, 509, 510], [111, 112, 421], [111, 112, 421], [111, 112, 421], [], [], [], [517], [], [], [520], [121, 521], [121, 521], [523], [523], [], [], [], [], [528], [], [], [131, 531], [131, 531], [], [], [], [], [], [], [], [], [140], [140], [], [], [], [], [], [546], [547], [], [], [550], [549], [], [149, 549], [148, 549], [550], [], [], [], [], [155, 156, 157, 158], [155, 156, 157, 158], [155, 156, 157, 158], [155, 156, 157, 158], [155, 156, 157, 158], [560], [], [], [563], [164, 564], [164, 564], [], [567], [], [], [570], [], [172, 194], [172, 194], [574], [], [], [], [], [], [], [], [582], [], [584], [], [], [], [], [], [590], [191, 592], [592], [488, 593, 637], [], [], [], [197, 597], [197, 597], [], [], [601], [602], [], [], [605], [], [], [608], [], [210, 211, 212], [210, 211, 212], [210, 211, 212], [210, 211, 212], [], [615], [], [617], [618], [619], [], [221], [221], [], [760], [], [], [], [228, 229, 230, 231, 232], [228, 229, 230, 231, 232], [228, 229, 230, 231, 232], [228, 229, 230, 231, 232], [228, 229, 230, 231, 232], [228, 229, 230, 231, 232], [], [635], [636], [237, 638], [237, 638], [639], [640], [749], [], [243, 652, 671, 729], [243, 652, 671, 729], [], [646], [], [648], [249], [249], [651], [252, 253, 254, 255], [252, 253, 254, 255], [252, 253, 254, 255], [252, 253, 254, 255], [252, 253, 254, 255], [], [], [259, 660, 664, 708], [259, 660, 708], [], [262, 263, 621, 659, 663], [262, 263, 621, 659, 663], [262, 263, 663], [265], [265], [667], [603, 644, 666], [269], [269], [271, 272, 273], [271, 272, 273], [271, 272, 273], [271, 272, 273], [], [], [], [279, 678, 680], [679], [278, 678, 680], [], [], [683], [684], [], [548, 686], [687], [288, 289], [288, 289], [288, 289], [], [], [692], [], [], [695], [296, 626, 697], [296, 626, 697], [698], [], [700], [701], [], [703], [704], [305], [305], [], [], [708, 709], [710], [311, 312, 313, 314, 315, 316], [311, 312, 313, 314, 315, 316], [311, 312, 313, 314, 315, 316], [311, 312, 313, 314, 315, 316], [311, 312, 313, 314, 315, 316], [311, 312, 313, 314, 315, 316], [311, 312, 313, 314, 315, 316], [718], [], [720], [], [], [], [724], [], [726], [727], [328, 329, 330, 331], [328, 329, 330, 331], [328, 329, 330, 331], [328, 329, 330, 331], [328, 329, 330, 331], [], [], [735], [], [], [], [739], [], [341, 342], [341, 342], [341, 342], [386], [345, 746], [345, 746], [641, 744], [], [], [], [751], [], [753], [754], [], [], [], [], [], [760], [], [434], [396, 664, 764], [], [], [], [], [369, 769, 770], [], [368], [772], [773], [774], [], [], [], [], [], [], [781], [782], [783], [784], [], [], [344], [], [], [557, 688], [], [792], [], [], [795], [], [], [363, 664], [799], [], [482, 558], [1], [2], [], [4], [671], [6], [7], [], [9], [10], [478], [102, 103, 104], [629], [], [503], [], [17], [], [19], [20], [], [22], [23], [], [25], [], [30], [], [], [24], [], [], [], [362], [], [574], [37], [], [], [40], [41], [648], [47, 48], [], [], [], [47, 48], [43], [], [], [], [61], [], [], [], [], [57], [58], [59], [], [], [], [], [64], [65], [42, 649], [], [], [69], [70], [71], [74], [], [], [68], [], [77], [411], [], [], [501, 556], [400, 558], [], [84], [], [86], [192, 592, 636], [], [], [], [92, 492, 493], [], [92, 491, 493], [92, 491, 493], [], [], [91], [], [], [100, 101, 500], [100, 101, 500], [481, 556], [415], [655, 673], [], [], [], [108], [], [], [111], [112, 113], [], [114], [115], [], [], [], [], [120], [], [], [123, 124], [], [], [], [], [], [], [], [131], [], [], [538], [], [], [], [136], [532], [138], [139], [140], [], [142], [143], [144], [283, 683], [145, 146], [147], [715], [], [], [], [], [], [479, 500], [387, 686], [398, 480], [157], [], [], [160], [161, 162], [], [], [], [], [], [167], [], [], [], [171], [434], [], [], [175], [], [], [], [179], [180], [181], [], [], [], [], [], [187], [188, 588], [188, 189, 588], [190, 485, 634], [], [], [], [194, 195], [603], [196], [], [198], [199], [265, 640, 663], [], [202], [], [595], [205], [], [], [755], [], [665], [], [212], [], [214], [215], [216], [], [261, 655, 660], [], [], [221, 757], [], [], [294, 295, 695], [], [683], [407], [706], [], [], [], [228], [229], [186, 481, 586], [230, 231], [231], [232], [], [340, 737], [], [260, 595, 657], [237], [238], [], [240], [435], [459], [243], [235, 236, 662, 721], [734], [724, 749], [664], [497, 665], [], [], [254, 613, 654], [252, 655, 700], [], [], [254, 255, 256, 613, 651], [251, 252, 652, 699], [356, 390], [260, 595, 636], [259], [605], [], [475, 551, 688], [235, 236, 644, 721], [398], [647], [497, 648], [215], [], [269], [270, 272, 671], [271], [270, 272, 670], [], [], [275], [276], [], [278, 540], [279], [702], [381, 549], [620], [], [], [284], [], [], [287], [392, 474, 550, 661], [288, 289, 618], [290], [], [292], [293], [], [295], [296], [], [], [651, 655], [301, 700], [301, 700], [302], [679], [622], [], [], [], [734], [542], [310], [], [312], [], [314], [], [316], [], [318], [319], [234, 235, 643, 662], [], [], [645, 747], [727], [], [], [327], [724], [], [], [], [], [644], [], [708], [339, 633], [], [], [], [232], [], [], [343], [], [345], [346], [347], [645, 723], [602], [], [615], [352]]
-
+    
     matches = []
 
-    # Assuming both lists have the same length (n_rows_t1)
+    # Combine matches from both sides while removing duplicates
     for i in range(len(matches_t1)):
-        # Get elements from each list at current index
         elements1 = matches_t1[i]
         elements2 = matches_t2[i]
         
-        # Combine elements while removing duplicates but preserving order
         combined = []
         
         # Add elements from matches_t1
@@ -392,7 +499,6 @@ def sem_union(
             if element not in combined:
                 combined.append(element)
         
-        # Add the combined elements to our result
         matches.append(combined)
 
     # Build a bipartite graph for connected components
@@ -446,6 +552,320 @@ def sem_union(
     return result_df
 
 
+def sem_union(
+    table1: pd.DataFrame,
+    table2: pd.DataFrame,
+    columns1: List[str],
+    columns2: List[str],
+    user_instruction: str,
+    default: bool = True,
+    examples_multimodal_data: list[dict[str, Any]] | None = None,
+    examples_answers: list[bool] | None = None,
+    cot_reasoning: list[str] | None = None,
+    strategy: str | None = None,
+    safe_mode: bool = False,
+    show_progress_bar: bool = True,
+    progress_bar_desc: str = "Union comparisons",
+    additional_cot_instructions: str = "",
+    sim_upper_threshold: float = 0.8,  # High similarity threshold
+    sim_lower_threshold: float = 0.3,  # Low similarity threshold
+    embedding_model: SentenceTransformer = None,
+) -> pd.DataFrame:
+    """
+    Implements a three-level semantic union operator with progressive matching strategies:
+    1. Exact match: Find rows that match exactly
+    2. Embedding similarity: Match rows with high similarity or filter out low similarity pairs
+    3. LLM-based matching: Use LLM for the remaining undecided pairs
+    
+    Args:
+        table1 (pd.DataFrame): Left table.
+        table2 (pd.DataFrame): Right table.
+        columns1 (List[str]): Columns from table1 to compare.
+        columns2 (List[str]): Columns from table2 to compare.
+        user_instruction (str): Instruction for the LLM
+        default (bool): Default value for filtering in case of parsing errors.
+        examples_multimodal_data (list[dict[str, Any]] | None): Example documents.
+        examples_answers (list[bool] | None): Example answers.
+        cot_reasoning (list[str] | None): Chain-of-thought reasoning examples.
+        strategy (str | None): Reasoning strategy.
+        safe_mode (bool): Show cost estimates.
+        show_progress_bar (bool): Show progress bar.
+        progress_bar_desc (str): Progress bar description.
+        additional_cot_instructions (str): Additional instructions for LLM.
+        sim_upper_threshold (float): Similarity threshold above which rows are considered a match.
+        sim_lower_threshold (float): Similarity threshold below which rows are considered not a match.
+        embedding_model (SentenceTransformer): Model for creating embeddings.
+    
+    Returns:
+        pd.DataFrame: DataFrame of representative rows from each matched group.
+    """
+    # Stack the tables together
+    combined_table = pd.concat([table1, table2], ignore_index=True)
+    n_rows_total = len(combined_table)
+    n_rows_t1 = len(table1)
+    
+    # Initialize the match matrix with -1 (unknown match status)
+    # -1: not yet determined, 0: not a match, 1: a match
+    match_matrix = np.full((n_rows_total, n_rows_total), -1, dtype=np.int8)
+    np.fill_diagonal(match_matrix, 0)  # Set diagonal to non-match (don't match with self)
+    
+    # Step 1: Exact matching
+    if show_progress_bar:
+        print("Step 1: Running exact matching...")
+    
+    exact_match_matrix = exact_match(
+        table1=combined_table, 
+        table2=None,  # Not used when is_stacked=True
+        columns1=columns1, 
+        columns2=columns2,
+        is_stacked=True  # Let the function know we've already stacked the tables
+    )
+    
+    # Count exact matches
+    exact_match_count = 0
+    exact_match_pairs = []
+    
+    # Update match matrix with exact matches (1)
+    match_indices = np.where(exact_match_matrix == 1)
+    for i, j in zip(match_indices[0], match_indices[1]):
+        # Make sure indices are valid
+        if i < n_rows_total and j < n_rows_total:
+            if i < j:  # Only count each pair once
+                exact_match_count += 1
+                exact_match_pairs.append((i, j))
+            match_matrix[i, j] = 1
+    
+    if show_progress_bar:
+        print(f"Layer 1 (Exact Match) - Found {exact_match_count} matching pairs")
+        print("Example matching pairs (first 5):")
+        for i, (idx1, idx2) in enumerate(exact_match_pairs[:5]):
+            row1 = combined_table.iloc[idx1]
+            row2 = combined_table.iloc[idx2]
+            print(f"Pair {i+1}: Row {idx1} and Row {idx2}")
+            print(f"  Title 1: {row1['title'] if 'title' in row1 else 'N/A'}")
+            print(f"  Title 2: {row2['title'] if 'title' in row2 else 'N/A'}")
+    
+    # Step 2: Embedding similarity matching
+    if show_progress_bar:
+        print("\nStep 2: Running embedding similarity matching...")
+    
+    # If no embedding model provided, create one
+    if embedding_model is None:
+        # Try to use the default model
+        try:
+            embedding_model = lotus.settings.retrieval_model
+        except AttributeError:
+            # Fall back to a standard sentence transformer
+            embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+    
+    # Generate similarity matrix
+    similarity_matrix, _ = build_similarity_matrix(
+        table1=combined_table,
+        table2=None,  # Not used when is_stacked=True
+        columns=columns1,  # Use all columns for comparison
+        rm=embedding_model,
+        full_matrix=True,  # We need the full matrix
+        is_stacked=True  # Let the function know we've already stacked the tables
+    )
+    
+    # Count similarity-based matches/non-matches
+    high_sim_count = 0
+    low_sim_count = 0
+    undecided_count = 0
+    high_sim_pairs = []
+    low_sim_pairs = []
+    
+    # Update match matrix based on similarity thresholds
+    # High similarity -> match (1)
+    # Low similarity -> non-match (0)
+    # In-between -> still unknown (-1)
+    for i in range(n_rows_total):
+        for j in range(i+1, n_rows_total):  # Only process upper triangle to avoid duplicates
+            if i >= n_rows_total or j >= n_rows_total:
+                continue  # Skip invalid indices
+                
+            if match_matrix[i, j] != -1:
+                continue  # Skip already determined pairs
+            
+            similarity = similarity_matrix[i, j]
+            
+            if similarity >= sim_upper_threshold:
+                match_matrix[i, j] = 1  # High similarity -> match
+                match_matrix[j, i] = 1  # Keep matrix symmetric
+                high_sim_count += 1
+                high_sim_pairs.append((i, j, similarity))
+            elif similarity <= sim_lower_threshold:
+                match_matrix[i, j] = 0  # Low similarity -> non-match
+                match_matrix[j, i] = 0  # Keep matrix symmetric
+                low_sim_count += 1
+                low_sim_pairs.append((i, j, similarity))
+            else:
+                undecided_count += 1
+    
+    if show_progress_bar:
+        print(f"Layer 2 (Embedding Similarity) - Found {high_sim_count} high-similarity matching pairs")
+        print(f"Layer 2 (Embedding Similarity) - Found {low_sim_count} low-similarity non-matching pairs")
+        print(f"Layer 2 (Embedding Similarity) - Left {undecided_count} pairs undecided")
+        
+        # Sort and show high-similarity pairs
+        high_sim_pairs.sort(key=lambda x: x[2], reverse=True)
+        print("\nTop high-similarity matching pairs (first 5):")
+        for i, (idx1, idx2, sim) in enumerate(high_sim_pairs[:5]):
+            row1 = combined_table.iloc[idx1]
+            row2 = combined_table.iloc[idx2]
+            print(f"Pair {i+1}: Row {idx1} and Row {idx2} (similarity: {sim:.4f})")
+            print(f"  Title 1: {row1['title'] if 'title' in row1 else 'N/A'}")
+            print(f"  Title 2: {row2['title'] if 'title' in row2 else 'N/A'}")
+    
+    # Step 3: LLM matching for remaining uncertain pairs
+    if show_progress_bar:
+        if undecided_count > 0:
+            print(f"\nStep 3: Running LLM matching for {undecided_count} undecided pairs...")
+        else:
+            print("\nStep 3: No undecided pairs, skipping LLM matching.")
+    
+    # Create mapping and docs list for LLM comparison
+    docs = []
+    mapping = []
+    
+    for i in range(n_rows_total):
+        for j in range(i + 1, n_rows_total):  # Only need to check one side due to symmetry
+            if match_matrix[i, j] == -1:  # Only process undecided pairs
+                row1 = combined_table.iloc[i]
+                row2 = combined_table.iloc[j]
+                
+                # Get the similarity score for this pair
+                similarity = similarity_matrix[i, j]
+                
+                # Create a document for LLM comparison that includes similarity score
+                doc = {
+                    "text": f"Row1: {row1[columns1].tolist()} | Row2: {row2[columns2].tolist()} | Similarity Score: {similarity:.4f}"
+                }
+                docs.append(doc)
+                mapping.append((i, j))
+    
+    # Skip LLM call if no undecided pairs
+    llm_match_count = 0
+    llm_non_match_count = 0
+    llm_match_pairs = []
+    if docs:
+        # Convert boolean example answers to strings
+        ex_answer_strs = None
+        if examples_answers is not None:
+            ex_answer_strs = ["True" if ans else "False" for ans in examples_answers]
+        
+        # Generate prompts
+        inputs = []
+        for doc in docs:
+            prompt = task_instructions.union_formatter(
+                doc,
+                user_instruction,
+                examples_multimodal_data,
+                ex_answer_strs,
+                cot_reasoning,
+                strategy,
+                reasoning_instructions=additional_cot_instructions,
+            )
+            lotus.logger.debug(f"LLM prompt: {prompt}")
+            inputs.append(prompt)
+        
+        # Cost estimate if in safe mode
+        if safe_mode:
+            estimated_total_calls = len(inputs)
+            estimated_total_cost = sum(lotus.settings.lm.count_tokens(inp) for inp in inputs)
+            show_safe_mode(estimated_total_cost, estimated_total_calls)
+        
+        # Call LLM
+        lm_output = lotus.settings.lm(
+            inputs,
+            show_progress_bar=show_progress_bar,
+            progress_bar_desc=progress_bar_desc,
+            logprobs=False
+        )
+        
+        # Process LLM outputs
+        postprocess_output = filter_postprocess(lm_output.outputs, default=False)
+        outputs_bool = postprocess_output.outputs
+        
+        # Update match matrix with LLM results
+        for idx, result in enumerate(outputs_bool):
+            i, j = mapping[idx]
+            if i < n_rows_total and j < n_rows_total:  # Ensure indices are valid
+                if result:
+                    match_matrix[i, j] = 1
+                    match_matrix[j, i] = 1  # Keep the matrix symmetric
+                    llm_match_count += 1
+                    llm_match_pairs.append((i, j))
+                else:
+                    match_matrix[i, j] = 0
+                    match_matrix[j, i] = 0  # Keep the matrix symmetric
+                    llm_non_match_count += 1
+                
+        if show_progress_bar and len(llm_match_pairs) > 0:
+            print(f"Layer 3 (LLM) - Found {llm_match_count} matching pairs and {llm_non_match_count} non-matching pairs")
+            print("\nLLM matching pairs (first 5):")
+            for i, (idx1, idx2) in enumerate(llm_match_pairs[:5]):
+                row1 = combined_table.iloc[idx1]
+                row2 = combined_table.iloc[idx2]
+                print(f"Pair {i+1}: Row {idx1} and Row {idx2}")
+                print(f"  Title 1: {row1['title'] if 'title' in row1 else 'N/A'}")
+                print(f"  Title 2: {row2['title'] if 'title' in row2 else 'N/A'}")
+    
+    if show_progress_bar:
+        print("\nSummary Statistics:")
+        total_comparisons = (n_rows_total * (n_rows_total-1)) // 2
+        print(f"Total number of pairwise comparisons: {total_comparisons}")
+        print(f"Layer 1 (Exact Match): {exact_match_count} matches ({exact_match_count / total_comparisons * 100:.2f}%)")
+        print(f"Layer 2 (Embedding Similarity): {high_sim_count} matches, {low_sim_count} non-matches")
+        print(f"Layer 3 (LLM): {llm_match_count} matches, {llm_non_match_count} non-matches")
+    
+    # Build the graph for connected components
+    graph = defaultdict(set)
+    
+    # Add edges based on match matrix
+    for i in range(n_rows_total):
+        for j in range(n_rows_total):
+            if match_matrix[i, j] == 1:  # If it's a match
+                graph[i].add(j)
+                graph[j].add(i)
+    
+    # DFS to find connected components
+    visited = set()
+    groups = []
+    
+    def dfs(node, group):
+        stack = [node]
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            group.add(current)
+            for neighbor in graph[current]:
+                if neighbor not in visited:
+                    stack.append(neighbor)
+    
+    for node in range(n_rows_total):
+        if node not in visited:
+            group = set()
+            dfs(node, group)
+            groups.append(group)
+    
+    # Select representative row from each group
+    rep_indices = []
+    for group in groups:
+        rep = min(group)  # Choose the row with the smallest index
+        rep_indices.append(rep)
+    
+    # Build final result DataFrame
+    final_rows = []
+    for idx in sorted(rep_indices):
+        row = combined_table.iloc[idx].copy()
+        final_rows.append(row)
+    
+    result_df = pd.DataFrame(final_rows)
+    return result_df
+
 @pd.api.extensions.register_dataframe_accessor("sem_union")
 class SemUnionDataFrame:
     """
@@ -472,7 +892,10 @@ class SemUnionDataFrame:
         other: pd.DataFrame | pd.Series,
         join_instruction: str,
         safe_mode: bool = False,
-        show_progress_bar: bool = True
+        show_progress_bar: bool = True,
+        sim_upper_threshold: float = 0.8,
+        sim_lower_threshold: float = 0.3,
+        embedding_model: SentenceTransformer = None,
     ) -> pd.DataFrame:
         """
         Applies sem_union between this DataFrame and another DataFrame/Series.
@@ -484,6 +907,9 @@ class SemUnionDataFrame:
                 are to be compared with columns X and Y in the right DataFrame.
             safe_mode (bool): Whether to show cost estimates.
             show_progress_bar (bool): Whether to display a progress bar.
+            sim_upper_threshold (float): Similarity threshold above which rows are considered a match.
+            sim_lower_threshold (float): Similarity threshold below which rows are considered not a match.
+            embedding_model (SentenceTransformer): Model for creating embeddings.
         
         Returns:
             pd.DataFrame: A DataFrame containing the representative rows from each connected match group.
@@ -512,15 +938,10 @@ class SemUnionDataFrame:
             raise ValueError("Both left and right columns must be specified in join_instruction for sem_union operator.")
         
         # Create a user instruction for row comparison.
-
-
         user_instruction = (
-            f"Compare these two rows and determine if they represent the same entity or information.\n\n"
+            f"Compare these two rows with the following columns and determine if they represent the same entity or information.\n\n"
             f"Row 1 columns: {left_columns}\n"
             f"Row 2 columns: {right_columns}\n\n"
-            f"Consider semantic meaning, not just exact string matches. For example, 'NY' and 'New York' represent the same state.\n"
-            f"Focus on identifying attributes that establish identity, even if formatting or minor details differ.\n"
-            f"If the rows likely represent the same underlying entity or information, answer True. Otherwise, answer False. Do not provide any explanation or code."
         )
         result = sem_union(
             table1=self._obj,
@@ -530,5 +951,8 @@ class SemUnionDataFrame:
             user_instruction=user_instruction,
             safe_mode=safe_mode,
             show_progress_bar=show_progress_bar,
+            sim_upper_threshold=sim_upper_threshold,
+            sim_lower_threshold=sim_lower_threshold,
+            embedding_model=embedding_model,
         )
         return result
