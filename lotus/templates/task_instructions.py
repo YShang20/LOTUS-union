@@ -169,12 +169,42 @@ def union_formatter(
     """
     # In a union task, we expect a simple yes/no answer.
     answer_instructions = "The answer should be either True or False."
-
+    
+    # Check if the text contains a similarity score
+    has_similarity_score = "Similarity Score:" in multimodal_data.get("text", "")
+    
     # System instruction for a union task.
-    sys_instruction = (
-        "You are provided with two rows and their corresponding fields. "
-        "Your task is to determine whether the two rows match semantically on the specified fields. "
-    )
+    if has_similarity_score:
+        # Enhanced system instruction for when similarity score is present
+        sys_instruction = (
+            "You are a data integration expert specializing in entity matching. "
+            "Task: "
+            "1. Examine two data records and assess whether they represent the same real-world entity. "
+            "2. Focus on semantic equivalence, accounting for variations in formatting, spelling, or completeness. "
+            "3. Reflect on the provided similarity score as guidance, but verify semantic alignment yourself."
+            "4. If a column is nan, na, null, or None, do not consider it in the comparison for both rows."
+            "5. Weigh key identifying fields more heavily than superficial details. Be strict, if there is enough difference, answer False."
+            
+
+            "Response: "
+            "Output exactly True or False (without quotes). "
+            "Do not provide any additional explanation, code, or commentary."
+        )
+    else:
+        # Original system instruction without similarity score
+        sys_instruction = (
+            "You are a data integration expert specializing in entity matching. "
+            "Task: "
+            "1. Examine two data records and assess whether they represent the same real-world entity. "
+            "2. Focus on semantic equivalence, accounting for variations in formatting, spelling, or completeness. "
+            "3. Weigh key identifying fields more heavily than superficial details. Be strict, if there is enough difference, answer False."
+            "4. If a column is nan, na, null, or None, do not consider it in the comparison for both rows."
+
+            "Response: "
+            "Output exactly True or False (without quotes). "
+            "Do not provide any additional explanation, code, or commentary."
+        )  
+         
     # Incorporate chain-of-thought instructions if strategy is "cot"
     if strategy == "cot":
         sys_instruction += cot_prompt_formatter(
