@@ -16,6 +16,13 @@ from sklearn.feature_extraction.text import TfidfTransformer
 from scipy.sparse import csr_matrix
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from lotus.types import CascadeArgs
+from lotus.utils import show_safe_mode
+from .cascade_utils import importance_sampling, learn_cascade_thresholds
+
+from sklearn.preprocessing import normalize
+
+
 
 def build_hnsw_index(embeddings: np.ndarray, space='cosine', ef_construction=200, M=16) -> hnswlib.Index:
     """
@@ -158,7 +165,6 @@ def find_semantic_groups(
     rep_rows = [df_stacked.iloc[idx].copy() for idx in rep_indices]
     return pd.DataFrame(rep_rows)
 
-# Create a function to build a similarity matrix from embeddings
 def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_stacked=False):
     """
     Build a similarity matrix where each entry (i,j) is the similarity score between row i and row j.
@@ -193,7 +199,8 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
     
     # Step 2: Embed the texts
     embeddings = rm._embed(df_result)
-    
+
+    embeddings = normalize(embeddings, norm='l2', axis=1)
     # Step 3: Build HNSW index for efficient similarity computation
     index = build_hnsw_index(embeddings, space='l2', ef_construction=500, M=64)
     
@@ -208,11 +215,12 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
             # Fill the similarity matrix
             for i in range(n_rows):
                 for j_idx, j in enumerate(labels[i]):
-                    # Use 1 - distance as similarity score (since lower distance means higher similarity)
                     if i == j:
                         similarity_matrix[i, j] = 0
                     else:
                         similarity_matrix[i, j] = 1.0 - min(1.0, distances[i][j_idx])
+                        # similarity_matrix[i, j] = np.exp(-distances[i][j_idx]**2 / (2 * 0.5**2))
+
         except RuntimeError as e:
             # Fallback to pairwise cosine similarity if KNN fails
             print("KNN query failed. Falling back to pairwise cosine similarity calculation.")
@@ -255,6 +263,47 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
             np.fill_diagonal(similarity_matrix, 0)
     
     return similarity_matrix, df_stacked
+def print_similarity_stats(similarity_matrix):
+    """
+    Calculate and print statistics about the similarity score distribution.
+    
+    Parameters:
+    - similarity_matrix: A square matrix of similarity scores
+    
+    Returns:
+    - None (prints statistics to console)
+    """
+    # Extract scores from upper triangle (excluding diagonal) to avoid counting pairs twice
+    n = similarity_matrix.shape[0]
+    upper_triangle_indices = np.triu_indices(n, k=1)
+    similarity_scores = similarity_matrix[upper_triangle_indices]
+    
+    # Calculate basic statistics
+    mean_score = np.mean(similarity_scores)
+    median_score = np.median(similarity_scores)
+    min_score = np.min(similarity_scores)
+    max_score = np.max(similarity_scores)
+    std_score = np.std(similarity_scores)
+    
+    # Calculate percentiles
+    percentiles = np.percentile(similarity_scores, [10, 25, 75, 90, 95, 99])
+    
+    # Count scores in different ranges
+    bins = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    hist, _ = np.histogram(similarity_scores, bins=bins)
+    # Print the statistics
+    print("\nSimilarity Score Distribution Statistics:")
+    print(f"Number of pairwise comparisons: {len(similarity_scores)}")
+    print(f"Mean similarity: {mean_score:.4f}")
+    print(f"Median similarity: {median_score:.4f}")
+    print(f"Min similarity: {min_score:.4f}")
+    print(f"Max similarity: {max_score:.4f}")
+    print(f"Standard deviation: {std_score:.4f}")
+    
+    print("\nHistogram (bins of 0.1):")
+    for i, count in enumerate(hist):
+        print(f"{bins[i]:.1f}-{bins[i+1]:.1f}: {count} ({count/len(similarity_scores)*100:.2f}%)")
+        
 
 def exact_match(
     table1: pd.DataFrame,
@@ -301,34 +350,18 @@ def exact_match(
     else:
         # If already stacked, just use table1
         df_stacked = table1
-        # In stacked mode, we assume the first half is from the first table
-        # This is a simplification that works if both tables have the same length
-        # For the general case, we would need to pass n_rows_t1 as a parameter
         n_rows_t1 = len(table1) // 2
     
     # Create concatenated strings for sorting
-    if len(columns1) == len(columns2):
-        # For each row, create a string by concatenating values from specified columns
-        concat_values = []
-        for idx, row in df_stacked.iterrows():
-            # Determine which set of columns to use based on whether the row came from table1 or table2
-            cols = columns1 if idx < n_rows_t1 else columns2
-            # Convert row values to strings and concatenate
-            row_str = "|".join(str(row[col]) for col in cols)
-            concat_values.append(row_str)
-        
-        df_stacked['_concat_key'] = concat_values
-    else:
-        # If column lengths don't match, we need a different approach
-        # For table1 rows, use columns1
-        for idx in range(n_rows_t1):
-            row = df_stacked.iloc[idx]
-            df_stacked.at[idx, '_concat_key'] = "|".join(str(row[col]) for col in columns1)
-        
-        # For table2 rows, use columns2
-        for idx in range(n_rows_t1, len(df_stacked)):
-            row = df_stacked.iloc[idx]
-            df_stacked.at[idx, '_concat_key'] = "|".join(str(row[col]) for col in columns2)
+    concat_values = []
+    for idx, row in df_stacked.iterrows():
+        # Determine which set of columns to use based on whether the row came from table1 or table2
+        cols = columns1 if idx < n_rows_t1 else columns2
+        # Convert row values to strings and concatenate
+        row_str = "|".join(str(row[col]) for col in cols)
+        concat_values.append(row_str)
+    
+    df_stacked['_concat_key'] = concat_values
     
     # Sort by the concatenated string
     df_sorted = df_stacked.sort_values('_concat_key')
@@ -362,6 +395,55 @@ def exact_match(
     
     return result_matrix
 
+def learn_union_thresholds(sim_matrix: np.ndarray,
+                         combined_df: pd.DataFrame,
+                         columns1: List[str],
+                         columns2: List[str],
+                         user_instr: str,
+                         cascade_args: CascadeArgs,
+                         examples_mm=None, examples_ans=None,
+                         cot=None, strategy=None, default=True):
+    """
+    Return (tau_pos, tau_neg) learned from a sampled subset of pairwise
+    similarities.
+    """
+    n = len(sim_matrix)
+    pairs   = [(i, j) for i in range(n) for j in range(i+1, n)]
+    scores  = [sim_matrix[i, j] for i, j in pairs]
+
+    samp_idx, corr = importance_sampling(scores, cascade_args)
+    samp_pairs  = [pairs[k] for k in samp_idx]
+    samp_scores = [scores[k] for k in samp_idx]
+    samp_corr   = corr[samp_idx]
+
+    # ----- build LLM docs only for the sample -----
+    docs = []
+    for (i, j) in samp_pairs:
+        r1 = combined_df.iloc[i][columns1].tolist()
+        r2 = combined_df.iloc[j][columns2].tolist()
+        docs.append({"text": f"Row1: {r1} | Row2: {r2}"})
+
+    lm_prompts = [
+        task_instructions.union_formatter(
+            d, user_instr, examples_mm,
+            ["True" if x else "False" for x in examples_ans] if examples_ans else None,
+            cot, strategy)
+        for d in docs
+    ]
+
+    out = lotus.settings.lm(
+        lm_prompts, show_progress_bar=True,
+        progress_bar_desc="Oracle for threshold learning"
+    )
+    oracle_bool = filter_postprocess(out.outputs, default=False).outputs
+
+    (pos_threshold, neg_threshold), _ = learn_cascade_thresholds(
+        proxy_scores=samp_scores,
+        oracle_outputs=oracle_bool,
+        sample_correction_factors=samp_corr,
+        cascade_args=cascade_args
+    )
+    return pos_threshold, neg_threshold
 
 #----
 
@@ -599,6 +681,7 @@ def sem_union(
     Returns:
         pd.DataFrame: DataFrame of representative rows from each matched group.
     """
+    cascade_args = CascadeArgs()
     # Stack the tables together
     combined_table = pd.concat([table1, table2], ignore_index=True)
     n_rows_total = len(combined_table)
@@ -637,13 +720,6 @@ def sem_union(
     
     if show_progress_bar:
         print(f"Layer 1 (Exact Match) - Found {exact_match_count} matching pairs")
-        print("Example matching pairs (first 5):")
-        for i, (idx1, idx2) in enumerate(exact_match_pairs[:5]):
-            row1 = combined_table.iloc[idx1]
-            row2 = combined_table.iloc[idx2]
-            print(f"Pair {i+1}: Row {idx1} and Row {idx2}")
-            print(f"  Title 1: {row1['title'] if 'title' in row1 else 'N/A'}")
-            print(f"  Title 2: {row2['title'] if 'title' in row2 else 'N/A'}")
     
     # Step 2: Embedding similarity matching
     if show_progress_bar:
@@ -667,7 +743,10 @@ def sem_union(
         full_matrix=True,  # We need the full matrix
         is_stacked=True  # Let the function know we've already stacked the tables
     )
-    
+    # sim_upper_threshold, sim_lower_threshold = learn_union_thresholds(similarity_matrix, combined_table, columns1, columns2, user_instruction, cascade_args)
+    # print("sim_upper_threshold, sim_lower_threshold", sim_upper_threshold, sim_lower_threshold)
+    print_similarity_stats(similarity_matrix)
+
     # Count similarity-based matches/non-matches
     high_sim_count = 0
     low_sim_count = 0
@@ -707,15 +786,6 @@ def sem_union(
         print(f"Layer 2 (Embedding Similarity) - Found {low_sim_count} low-similarity non-matching pairs")
         print(f"Layer 2 (Embedding Similarity) - Left {undecided_count} pairs undecided")
         
-        # Sort and show high-similarity pairs
-        high_sim_pairs.sort(key=lambda x: x[2], reverse=True)
-        print("\nTop high-similarity matching pairs (first 5):")
-        for i, (idx1, idx2, sim) in enumerate(high_sim_pairs[:5]):
-            row1 = combined_table.iloc[idx1]
-            row2 = combined_table.iloc[idx2]
-            print(f"Pair {i+1}: Row {idx1} and Row {idx2} (similarity: {sim:.4f})")
-            print(f"  Title 1: {row1['title'] if 'title' in row1 else 'N/A'}")
-            print(f"  Title 2: {row2['title'] if 'title' in row2 else 'N/A'}")
     
     # Step 3: LLM matching for remaining uncertain pairs
     if show_progress_bar:
