@@ -187,8 +187,9 @@ def union_formatter(
             
 
             "Response: "
-            "Output exactly True or False (without quotes). "
-            "Do not provide any additional explanation, code, or commentary."
+            "think through the task step by step and then in the end output exactly True or False. "
+            #"Output exactly True or False (without quotes). "
+            #"Do not provide any additional explanation, code, or commentary."
         )
     else:
         # Original system instruction without similarity score
@@ -201,8 +202,7 @@ def union_formatter(
             "4. If a column is nan, na, null, or None, do not consider it in the comparison for both rows."
 
             "Response: "
-            "Output exactly True or False (without quotes). "
-            "Do not provide any additional explanation, code, or commentary."
+            "think through the task step by step and then in the end output exactly True or False. "
         )  
          
     # Incorporate chain-of-thought instructions if strategy is "cot"
