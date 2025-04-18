@@ -168,7 +168,9 @@ def union_formatter(
         List[dict[str, str]]: A list of messages for the LLM.
     """
     # In a union task, we expect a simple yes/no answer.
-    answer_instructions = "The answer should be either True or False."
+    answer_instructions = ("Response: "
+            "Reason step-by-step: 1. Compare [Key Attribute 1] in both rows. Note any similarities or discrepancies. 2. Compare [Key Attribute 2]... 3. Assess the overall similarity considering attribute importance and the provided similarity score. 4. Conclude with your final decision."
+            "Format: Reasoning:\n<Your detailed reasoning here>\n\nAnswer: <True or False>")
     
     # Check if the text contains a similarity score
     has_similarity_score = "Similarity Score:" in multimodal_data.get("text", "")
@@ -181,15 +183,10 @@ def union_formatter(
             "Task: "
             "1. Examine two data records and assess whether they represent the same real-world entity. "
             "2. Focus on semantic equivalence, accounting for variations in formatting, spelling, or completeness. "
-            "3. Reflect on the provided similarity score as guidance, but verify semantic alignment yourself."
+            "3. A similarity score is provided, ranging from 0 (completely dissimilar) to 1 (highly similar based on embeddings). "
+            "Use this score as an initial indicator, but your final decision must be based on a detailed comparison of the attribute values."
             "4. If a column is nan, na, null, or None, do not consider it in the comparison for both rows."
-            "5. Weigh key identifying fields more heavily than superficial details. Be strict, if there is enough difference, answer False."
-            
-
-            "Response: "
-            "think through the task step by step and then in the end output exactly True or False. "
-            #"Output exactly True or False (without quotes). "
-            #"Do not provide any additional explanation, code, or commentary."
+            "5. Weigh key identifying fields more heavily than superficial details."
         )
     else:
         # Original system instruction without similarity score
@@ -198,11 +195,8 @@ def union_formatter(
             "Task: "
             "1. Examine two data records and assess whether they represent the same real-world entity. "
             "2. Focus on semantic equivalence, accounting for variations in formatting, spelling, or completeness. "
-            "3. Weigh key identifying fields more heavily than superficial details. Be strict, if there is enough difference, answer False."
+            "3. Weigh key identifying fields more heavily than superficial details."
             "4. If a column is nan, na, null, or None, do not consider it in the comparison for both rows."
-
-            "Response: "
-            "think through the task step by step and then in the end output exactly True or False. "
         )  
          
     # Incorporate chain-of-thought instructions if strategy is "cot"
