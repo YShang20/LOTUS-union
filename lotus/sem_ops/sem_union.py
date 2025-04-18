@@ -2,6 +2,7 @@ import pandas as pd
 import numpy as np
 from typing import List, Dict, Set, Any
 from tqdm import tqdm
+import sys
 
 import lotus
 from lotus.cache import operator_cache
@@ -239,41 +240,19 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
         try:
             # Query the index for top-k nearest neighbors for each point
             labels, distances = index.knn_query(embeddings, k=k)
-            
+            print('label length:', len(labels[0]))
+            print('dist length:', len(distances[0]))
             # Fill the similarity matrix with known values
+            pairs = []
+            scores = []
             for i in range(n_rows):
-            #     proxy_scores = distances[i]
-
-            #      # for each row, do importance sampling and derive the thresholds
-            #     sample_indices, correction_factors = importance_sampling(proxy_scores, cascade_args)
-
-            #     # should i use embeddings here or df_stacked?
-            #     sample_df = embeddings.loc[sample_indices]
-            #     sample_multimodal_data = task_instructions.df2multimodal_info(sample_df, col_li)
-            #     sample_proxy_scores = [proxy_scores[i] for i in sample_indices]
-            #     sample_correction_factors = correction_factors[sample_indices]
-
-            #     pos_cascade_threshold, neg_cascade_threshold = learn_filter_cascade_thresholds(
-            #     sample_multimodal_data=sample_multimodal_data,
-            #     lm=lotus.settings.lm,
-            #     formatted_usr_instr=formatted_usr_instr,
-            #     default=default,
-            #     cascade_args=cascade_args,
-            #     proxy_scores=sample_proxy_scores,
-            #     sample_correction_factors=sample_correction_factors,
-            #     examples_multimodal_data=examples_multimodal_data,
-            #     examples_answers=examples_answers,
-            #     cot_reasoning=cot_reasoning,
-            #     strategy=strategy,
-            #     additional_cot_instructions=additional_cot_instructions,
-            # )
-
-            # stats["pos_cascade_threshold"] = pos_cascade_threshold
-            # stats["neg_cascade_threshold"] = neg_cascade_threshold
-
                 for j_idx, j in enumerate(labels[i]):
-                    # Convert distance to similarity score (1 - distance) and clip to [0,1]
+                    if j >= n_rows:
+                        continue
                     similarity_matrix[i, j] = 1.0 - min(1.0, distances[i][j_idx])
+                    # change to the following if k = 50
+                    # pairs.append((i, j))
+                    # scores.append(1.0 - min(1.0, distances[i][j_idx]))
         except RuntimeError as e:
             # Fallback to pairwise cosine similarity if KNN fails
             print("KNN query failed. Falling back to pairwise cosine similarity calculation.")
@@ -288,9 +267,10 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
             # Set diagonal to zero (no self-matches)
             np.fill_diagonal(similarity_matrix, 0)
     
-    return similarity_matrix, df_stacked
+    return similarity_matrix, df_stacked, pairs, scores
 
 def learn_union_thresholds(sim_matrix: np.ndarray,
+                           pairs_in: np.ndarray, # this is only useful if using the dense approach, remember to also pass in scores_in
                          combined_df: pd.DataFrame,
                          columns1: List[str],
                          columns2: List[str],
@@ -303,14 +283,17 @@ def learn_union_thresholds(sim_matrix: np.ndarray,
     similarities.
     """
     n = len(sim_matrix)
-    pairs   = [(i, j) for i in range(n) for j in range(i+1, n)]
-    scores  = [sim_matrix[i, j] for i, j in pairs]
+    pairs   = [(i, j) for i in range(n) for j in range(i+1, n) if sim_matrix[i, j] >= 0.2]
+    scores  = [sim_matrix[i, j] for i, j in pairs if sim_matrix[i, j] >= 0.2]
 
     samp_idx, corr = importance_sampling(scores, cascade_args)
+    print("sampidex:", len(samp_idx))
+    
     samp_pairs  = [pairs[k] for k in samp_idx]
+    print('sampairs:', len(samp_pairs))
     samp_scores = [scores[k] for k in samp_idx]
     samp_corr   = corr[samp_idx]
-
+    
     # ----- build LLM docs only for the sample -----
     docs = []
     for (i, j) in samp_pairs:
@@ -325,6 +308,9 @@ def learn_union_thresholds(sim_matrix: np.ndarray,
             cot, strategy)
         for d in docs
     ]
+    llm_call_count = len(samp_pairs)
+    print ("LLM calls:", llm_call_count)
+    #sys.exit()
 
     out = lotus.settings.lm(
         lm_prompts, show_progress_bar=True,
@@ -746,15 +732,18 @@ def sem_union(
             embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
     
     # Generate similarity matrix
-    similarity_matrix, _ = build_similarity_matrix(
+    similarity_matrix, _, dense_pairs, dense_scores = build_similarity_matrix(
         table1=combined_table,
         table2=None,  # Not used when is_stacked=True
         columns=columns1,  # Use all columns for comparison
         rm=embedding_model,
-        full_matrix=True,  # We need the full matrix
+        full_matrix=False,  # We need the full matrix
         is_stacked=True  # Let the function know we've already stacked the tables
     )
-    sim_upper_threshold, sim_lower_threshold = learn_union_thresholds(similarity_matrix, combined_table, columns1, columns2, user_instruction, cascade_args)
+    # this is how you would call it when only limiting k = 50 closest neighbors to save LLM calls
+    #sim_upper_threshold, sim_lower_threshold = learn_union_thresholds(dense_scores, dense_pairs, combined_table, columns1, columns2, user_instruction, cascade_args)
+
+    sim_upper_threshold, sim_lower_threshold = learn_union_thresholds(similarity_matrix, dense_pairs, combined_table, columns1, columns2, user_instruction, cascade_args)
 
     # Count similarity-based matches/non-matches
     high_sim_count = 0
