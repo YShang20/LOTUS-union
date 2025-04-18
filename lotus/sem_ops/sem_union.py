@@ -218,8 +218,8 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
                     if i == j:
                         similarity_matrix[i, j] = 0
                     else:
-                        similarity_matrix[i, j] = 1.0 - min(1.0, distances[i][j_idx])
-                        # similarity_matrix[i, j] = np.exp(-distances[i][j_idx]**2 / (2 * 0.5**2))
+                        #  similarity_matrix[i, j] = 1.0 - min(1.0, distances[i][j_idx])
+                        similarity_matrix[i, j] = np.exp(-distances[i][j_idx]**2 / (2 * 0.5**2))
 
         except RuntimeError as e:
             # Fallback to pairwise cosine similarity if KNN fails
@@ -445,9 +445,63 @@ def learn_union_thresholds(sim_matrix: np.ndarray,
     )
     return pos_threshold, neg_threshold
 
+from scipy.signal import argrelextrema
+from scipy.ndimage import gaussian_filter1d
+
+def detect_valley(
+        scores,
+        default_lower,
+        default_upper,
+        bins='auto',
+        smooth_sigma=1.5,
+        valley_prominence=0.01      # ignore negligible dips
+    ):
+    """
+    Unsupervised threshold detection by valley‑finding on a smoothed histogram.
+
+    Returns (lower_threshold, upper_threshold).  If the distribution is unimodal
+    or no prominent valleys appear, falls back to defaults.
+    """
+    scores = np.asarray(scores, dtype=float)
+
+
+    # keep only finite scores
+    scores = scores[np.isfinite(scores)]
+    if scores.size == 0:
+        return default_lower, default_upper
+    # normalise to [0,1] if necessary
+    if scores.min() < 0 or scores.max() > 1:
+        scores = (scores - scores.min()) / (scores.max() - scores.min())
+
+    # histogram + smoothing ---------------------------------------------------
+    hist, edges = np.histogram(scores, bins=bins, range=(0, 1), density=True)
+    pdf = gaussian_filter1d(hist, sigma=smooth_sigma)
+
+    # valleys = local minima whose depth is significant ----------------------
+    minima = argrelextrema(pdf, np.less)[0]
+    # keep only valleys with enough prominence
+    prominences = pdf[minima]
+    minima = minima[prominences < pdf.max() * (1 - valley_prominence)]
+
+    if minima.size == 0:            # unimodal → use defaults / quantiles
+        return default_lower, default_upper
+    elif minima.size == 1:          # one clear valley
+        t = (edges[minima[0]] + edges[minima[0] + 1]) / 2.0
+        return  t, default_upper
+    elif minima.size > 2:                           # > 2 valleys → take first & second to last
+        t1 = (edges[minima[0]]     + edges[minima[0] + 1]) / 2.0
+        t2 = (edges[minima[-2]]    + edges[minima[-2] + 1]) / 2.0
+        # if max(t1, t2) > default_upper:
+        #     return min(t1, t2), default_upper
+        return min(t1, t2), max(t1, t2)
+    else:                           # = 2 valleys → take first & last
+        t1 = (edges[minima[0]]     + edges[minima[0] + 1]) / 2.0
+        t2 = (edges[minima[-1]]    + edges[minima[-1] + 1]) / 2.0
+        return min(t1, t2), max(t1, t2)
+
 #----
 
-def llm_union(
+def gold_union(
     table1: pd.DataFrame,
     table2: pd.DataFrame,
     columns1: List[str],
@@ -652,6 +706,7 @@ def sem_union(
     sim_upper_threshold: float = 0.8,  # High similarity threshold
     sim_lower_threshold: float = 0.3,  # Low similarity threshold
     embedding_model: SentenceTransformer = None,
+    auto_threshold: bool = False,  # Whether to automatically determine thresholds
 ) -> pd.DataFrame:
     """
     Implements a three-level semantic union operator with progressive matching strategies:
@@ -677,7 +732,7 @@ def sem_union(
         sim_upper_threshold (float): Similarity threshold above which rows are considered a match.
         sim_lower_threshold (float): Similarity threshold below which rows are considered not a match.
         embedding_model (SentenceTransformer): Model for creating embeddings.
-    
+        auto_threshold (bool): Whether to automatically determine thresholds.
     Returns:
         pd.DataFrame: DataFrame of representative rows from each matched group.
     """
@@ -698,10 +753,10 @@ def sem_union(
     
     exact_match_matrix = exact_match(
         table1=combined_table, 
-        table2=None,  # Not used when is_stacked=True
+        table2=None, 
         columns1=columns1, 
         columns2=columns2,
-        is_stacked=True  # Let the function know we've already stacked the tables
+        is_stacked=True 
     )
     
     # Count exact matches
@@ -747,6 +802,33 @@ def sem_union(
     # print("sim_upper_threshold, sim_lower_threshold", sim_upper_threshold, sim_lower_threshold)
     print_similarity_stats(similarity_matrix)
 
+    # Auto-determine thresholds if requested
+    if auto_threshold:
+        # Extract upper triangle of similarity matrix (avoiding diagonal)
+        similarity_scores = []
+        for i in range(n_rows_total):
+            for j in range(i + 1, n_rows_total):
+                # Skip if already matched exactly
+                if match_matrix[i, j] != 1 and similarity_matrix[i, j] > 0.1:
+                    similarity_scores.append(similarity_matrix[i, j])
+                    
+        if len(similarity_scores) > 10:
+            if show_progress_bar:
+                print("Automatically determining similarity thresholds based on score distribution...")
+            
+            lower_threshold, upper_threshold = detect_valley(
+                similarity_scores, 
+                default_lower=sim_lower_threshold,
+                default_upper=sim_upper_threshold
+            )
+            
+            if show_progress_bar:
+                print(f"Auto-detected thresholds - Lower: {lower_threshold:.4f}, Upper: {upper_threshold:.4f}")
+            
+            # Update the thresholds
+            sim_lower_threshold = lower_threshold
+            sim_upper_threshold = upper_threshold
+    
     # Count similarity-based matches/non-matches
     high_sim_count = 0
     low_sim_count = 0
