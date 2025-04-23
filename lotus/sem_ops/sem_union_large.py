@@ -24,6 +24,10 @@ from typing import Tuple
 
 from .cascade_utils import importance_sampling, learn_cascade_thresholds
 
+
+from scipy.signal import argrelextrema
+from scipy.ndimage import gaussian_filter1d
+
 def reps_from_graph(graph, df):
     visited, reps = set(), []
     def dfs(v, comp):
@@ -50,6 +54,58 @@ def build_hnsw_index_dense(emb: np.ndarray,
     idx.set_ef(ef_query)
     return idx
 
+
+def detect_valley(
+        scores,
+        default_lower,
+        default_upper,
+        bins='auto',
+        smooth_sigma=1.5,
+        valley_prominence=0.01      # ignore negligible dips
+    ):
+    """
+    Unsupervised threshold detection by valley‑finding on a smoothed histogram.
+
+    Returns (lower_threshold, upper_threshold).  If the distribution is unimodal
+    or no prominent valleys appear, falls back to defaults.
+    """
+    scores = np.asarray(scores, dtype=float)
+
+
+    # keep only finite scores
+    scores = scores[np.isfinite(scores)]
+    if scores.size == 0:
+        return default_lower, default_upper
+    # normalise to [0,1] if necessary
+    if scores.min() < 0 or scores.max() > 1:
+        scores = (scores - scores.min()) / (scores.max() - scores.min())
+
+    # histogram + smoothing ---------------------------------------------------
+    hist, edges = np.histogram(scores, bins=bins, range=(0, 1), density=True)
+    pdf = gaussian_filter1d(hist, sigma=smooth_sigma)
+
+    # valleys = local minima whose depth is significant ----------------------
+    minima = argrelextrema(pdf, np.less)[0]
+    # keep only valleys with enough prominence
+    prominences = pdf[minima]
+    minima = minima[prominences < pdf.max() * (1 - valley_prominence)]
+
+    if minima.size == 0:            # unimodal → use defaults / quantiles
+        return default_lower, default_upper
+    elif minima.size == 1:          # one clear valley
+        t = (edges[minima[0]] + edges[minima[0] + 1]) / 2.0
+        return  t, default_upper
+    elif minima.size > 2:                           # > 2 valleys → take first & second to last
+        t1 = (edges[minima[0]]     + edges[minima[0] + 1]) / 2.0
+        t2 = (edges[minima[-2]]    + edges[minima[-2] + 1]) / 2.0
+        # if max(t1, t2) > default_upper:
+        #     return min(t1, t2), default_upper
+        return min(t1, t2), max(t1, t2)
+    else:                           # = 2 valleys → take first & last
+        t1 = (edges[minima[0]]     + edges[minima[0] + 1]) / 2.0
+        t2 = (edges[minima[-1]]    + edges[minima[-1] + 1]) / 2.0
+        return min(t1, t2), max(t1, t2)
+    
 
 def compute_embedding(df_in: pd.DataFrame):
     rows, cols, data = [], [], []
@@ -101,7 +157,7 @@ def build_similarity_map(emb: np.ndarray,
     """
     idx = build_hnsw_index_dense(emb, space=space)
     #labels, dists = idx.knn_query(emb, k=min(k, len(emb)))
-    labels, dists = idx.knn_query(emb, k=500)
+    labels, dists = idx.knn_query(emb, k=50)
     sim_map = defaultdict(list)
 
     for i in range(len(labels)):
@@ -254,10 +310,8 @@ def exact_match_sparse(
 
 
 def llm_union_sparse(
-        table1: pd.DataFrame,
-        table2: pd.DataFrame,
-        columns1: List[str],
-        columns2: List[str],
+        neighbor_map:  Dict[int, List[tuple[int, float]]],
+        combined: List[str],
         user_instruction: str,
         *,
         exact_match_map: Dict[int, List[int]],
@@ -276,9 +330,7 @@ def llm_union_sparse(
       * exact matches already in `exact_match_map`
       * undecided pairs queried with the LLM
     """
-    combined = pd.concat([table1, table2], ignore_index=True)
-    n        = len(combined)
-
+   
 
     # ── 1.  build adjacency from exact matches ───────────────────
     graph: Dict[int, Set[int]] = defaultdict(set)
@@ -289,12 +341,12 @@ def llm_union_sparse(
 
     # ── 2.  decide remaining pairs with the LLM  (only i<j) ──────
     docs, mapping = [], []
-    for i in range(n):
-        for j in range(i + 1, n):
+    for i in range(len(neighbor_map)):
+        for j , sim_score in neighbor_map[i]:
             if j in graph[i]:              # already matched
                 continue
-            row1 = combined.iloc[i][columns1].tolist()
-            row2 = combined.iloc[j][columns2].tolist()
+            row1 = combined[i]
+            row2 = combined[j]
             docs.append({"text": f"Row1: {row1} | Row2: {row2}"})
             mapping.append((i, j))
 
@@ -356,8 +408,9 @@ def sem_union(
     columns2: List[str],
     user_instruction: str,
     *,
-    k_neighbors: int = 1_000,
+    k_neighbors: int = 50,
     run_llm:     bool  = True,
+    auto_threshold = "Default",
     default:     bool  = True,
     examples_multimodal_data=None,
     examples_answers=None,
@@ -404,8 +457,11 @@ def sem_union(
 
     texts = combined[columns1].astype(str).agg(" | ".join, axis=1).tolist()
     print(f"    ↳ Total text entries: {len(texts)}")
-
-    emb = compute_embedding(combined)
+    combined_compressed = combined.apply(
+    lambda row: " | ".join([f"{col}: {row[col]}" for col in columns1 if pd.notna(row[col])]),
+    axis=1).tolist()
+    #emb = compute_embedding(combined)
+    emb = embedding_model._embed(combined_compressed)
     print(f"    ↳ Embeddings shape: {emb.shape}, approx memory: {emb.data.nbytes / 1024**2:.2f} MB")
 
     neighbor_map = build_similarity_map(emb, k=k_neighbors)
@@ -414,20 +470,56 @@ def sem_union(
     print(f"    ↳ Avg neighbors per row: {np.mean(neighbor_counts):.2f}, max: {np.max(neighbor_counts)}")
 
     # 2B ─────────── learn thresholds ─────────────────────────────
-    tau_pos, tau_neg = learn_union_thresholds_dense(
-        neighbor_map,
-        combined,
-        columns1, columns2,
-        user_instruction,
-        cascade_args,
-        examples_mm   = examples_multimodal_data,
-        examples_ans  = examples_answers,
-        cot           = cot_reasoning,
-        strategy      = strategy,
-        default       = default,
-    )
-    if show_progress_bar:
-        print(f"[∪] Learned thresholds: τ⁺ = {tau_pos:.4f}, τ⁻ = {tau_neg:.4f}")
+    if auto_threshold == "Default":
+        tau_pos = 0.8
+        tau_neg = 0.3
+
+    if auto_threshold == "Valley":
+            # Extract upper triangle of similarity matrix (avoiding diagonal)
+            similarity_scores = []
+            for i in range(len(neighbor_map)):
+                for j, sim_score in  neighbor_map[i]:  # Skip if already matched exactly
+                    if j not in exact_map[i]  and sim_score > 0.1:
+                        similarity_scores.append(sim_score)
+                        
+            if len(similarity_scores) > 10:
+                if show_progress_bar:
+                    print("Automatically determining similarity thresholds based on score distribution...")
+                
+                lower_threshold, upper_threshold = detect_valley(
+                    similarity_scores, 
+                    default_lower=0.3,
+                    default_upper=0.8
+                )
+                
+                if show_progress_bar:
+                    print(f"Auto-detected thresholds - Lower: {lower_threshold:.4f}, Upper: {upper_threshold:.4f}")
+                
+                # Update the thresholds
+                tau_neg = lower_threshold
+                tau_pos = upper_threshold
+    
+    elif auto_threshold == "Oracle":
+        # this is how you would call it when only limiting k = 50 closest neighbors to save LLM calls
+        #sim_upper_threshold, sim_lower_threshold = learn_union_thresholds(dense_scores, dense_pairs, combined_table, columns1, columns2, user_instruction, cascade_args)
+        
+        tau_pos, tau_neg = learn_union_thresholds_dense(
+            neighbor_map,
+            combined,
+            columns1, columns2,
+            user_instruction,
+            cascade_args,
+            examples_mm   = examples_multimodal_data,
+            examples_ans  = examples_answers,
+            cot           = cot_reasoning,
+            strategy      = strategy,
+            default       = default,
+        )
+        if show_progress_bar:
+            print(f"[∪] Learned thresholds: τ⁺ = {tau_pos:.4f}, τ⁻ = {tau_neg:.4f}")
+
+
+
     # tau_pos = 0.7
     # tau_neg = 0.3
 
@@ -457,39 +549,38 @@ def sem_union(
             else:
                 undecided.append((i, j))
 
-    candidate_pairs = []
-    def similarity():
-        return 1
-    def LLM_decision():
-        return 1
-    lower_bound = 0
-    upper_bound = 0
+    # candidate_pairs = []
+    # def similarity():
+    #     return 1
+    # def LLM_decision():
+    #     return 1
+    # lower_bound = 0
+    # upper_bound = 0
 
-    for (i, j) in candidate_pairs:
-        sim_score = similarity(i, j)
+    # for (i, j) in candidate_pairs:
+    #     sim_score = similarity(i, j)
 
-        if sim_score >= upper_bound:
-            graph.add_edge(i, j)  # High confidence match
-        elif lower_bound <= sim_score < upper_bound:
-            if LLM_decision(i, j) == True:
-                graph.add_edge(i, j)  # Confirmed by LLM
-        else:
-            continue  # Rejected
+    #     if sim_score >= upper_bound:
+    #         graph.add_edge(i, j)  # High confidence match
+    #     elif lower_bound <= sim_score < upper_bound:
+    #         if LLM_decision(i, j) == True:
+    #             graph.add_edge(i, j)  # Confirmed by LLM
+    #     else:
+    #         continue  # Rejected
 
     if show_progress_bar:
         print(f"    ↳ High sim: {hi_cnt}, Low sim: {lo_cnt}, Undecided: {len(undecided)}")
         print(f"    ↳ Graph now has {len(graph)} nodes")
 
     # 3 ─────────── LLM Step ─────────────────────────────────────
+    run_llm = False
     if run_llm and undecided:
         if show_progress_bar:
             print("[∪] Step 3 – LLM on undecided pairs …")
 
         result_df = llm_union_sparse(
-            table1=combined,
-            table2=combined,
-            columns1=columns1,
-            columns2=columns2,
+            neighbor_map=neighbor_map,
+            combined= combined_compressed,
             user_instruction=user_instruction,
             exact_match_map=graph,
             default=default,
