@@ -63,11 +63,12 @@ result_df = sem_union(
     columns1=columns,
     columns2=columns,
     user_instruction=user_instruction,
-    sim_upper_threshold=0.9, 
-    sim_lower_threshold=0.35, 
+    sim_upper_threshold=0.6, 
+    sim_lower_threshold=0.6, 
     embedding_model=rm,  # Pass the embedding model directly
     safe_mode=False,
-    show_progress_bar=True
+    show_progress_bar=True,
+   # auto_threshold="Oracle"
 )
 
 # Save results
@@ -89,34 +90,30 @@ try:
     print(f"Ground truth unique records: {unique_ground_truth}")
     print(f"Our method unique records: {unique_results}")
     
-    # Try to match records between our results and ground truth
-    # Since we don't have perfect matching capability, we'll use title as a key matcher
-    # and check author as a secondary validation
+
     matched_records = 0
+
+    match_columns = ['author', 'date', 'description', 'length', 'price', 'publisher', 'title']
     
     for _, our_row in result_df.iterrows():
-        our_title = our_row['title'].lower() if 'title' in our_row else ''
-        our_author = our_row['author'].lower() if 'author' in our_row else ''
-        
+        match_found_for_our_row = False
         for _, gt_row in ground_truth.iterrows():
-            gt_title = gt_row['title'].lower() if 'title' in gt_row else ''
-            gt_author = gt_row['author'].lower() if 'author' in gt_row else ''
+            all_columns_match = True
+            for col in match_columns:
+                # Get values, handle potential missing columns/NaNs, convert to lowercase string
+                our_val = str(our_row[col]).lower() if col in our_row and pd.notna(our_row[col]) else ''
+                gt_val = str(gt_row[col]).lower() if col in gt_row and pd.notna(gt_row[col]) else ''
+                
+                # Check for exact match for this column
+                if our_val != gt_val:
+                    all_columns_match = False
+                    break
             
-            # Check if titles are very similar
-            title_match = our_title in gt_title or gt_title in our_title or \
-                          (len(our_title) > 0 and len(gt_title) > 0 and \
-                          (our_title[:20] == gt_title[:20] or \
-                          our_title[-20:] == gt_title[-20:]))
-                          
-            # Check if authors match
-            author_match = our_author in gt_author or gt_author in our_author or \
-                          (len(our_author) > 0 and len(gt_author) > 0 and \
-                          our_author.split()[0] == gt_author.split()[0])
-            
-            if title_match and author_match:
+            if all_columns_match:
                 matched_records += 1
-                break
-    
+                match_found_for_our_row = True 
+                break 
+
     # Calculate metrics
     true_positives = matched_records  # Records we correctly found
     false_positives = unique_results - matched_records  # Records in our results that don't match ground truth
