@@ -12,4 +12,7 @@ __all__ = [
     "sem_cluster_by",
     "sem_partition_by",
     "sem_dedup",
+    "sem_union",
+    "sem_intersect",
 ]
+
