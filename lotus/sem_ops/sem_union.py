@@ -205,6 +205,8 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
     index = build_hnsw_index(embeddings, space='l2', ef_construction=500, M=64)
     
     # Step 4: Create the similarity matrix
+    pairs = []  
+    scores = [] 
     if full_matrix:
         similarity_matrix = np.zeros((n_rows, n_rows))
         
@@ -238,7 +240,7 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
         # Use a sparse approach - only compute for k nearest neighbors
         k = min(50, n_rows-1)  # Set a reasonable k value
         similarity_matrix = np.zeros((n_rows, n_rows))
-        
+
         try:
             # Query the index for top-k nearest neighbors for each point
             labels, distances = index.knn_query(embeddings, k=k)
@@ -246,6 +248,8 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
             # Fill the similarity matrix with known values
             for i in range(n_rows):
                 for j_idx, j in enumerate(labels[i]):
+                    if j >= n_rows:
+                        continue
                     # Convert distance to similarity score (1 - distance) and clip to [0,1]
                     similarity_matrix[i, j] = 1.0 - min(1.0, distances[i][j_idx])
         except RuntimeError as e:
@@ -262,7 +266,7 @@ def build_similarity_matrix(table1, table2, columns, rm, full_matrix=False, is_s
             # Set diagonal to zero (no self-matches)
             np.fill_diagonal(similarity_matrix, 0)
     
-    return similarity_matrix, df_stacked
+    return similarity_matrix, df_stacked, pairs, scores
 def print_similarity_stats(similarity_matrix):
     """
     Calculate and print statistics about the similarity score distribution.
@@ -396,6 +400,7 @@ def exact_match(
     return result_matrix
 
 def learn_union_thresholds(sim_matrix: np.ndarray,
+                           pairs_in: np.ndarray, # this is only useful if using the dense approach, remember to also pass in scores_in
                          combined_df: pd.DataFrame,
                          columns1: List[str],
                          columns2: List[str],
@@ -408,14 +413,17 @@ def learn_union_thresholds(sim_matrix: np.ndarray,
     similarities.
     """
     n = len(sim_matrix)
-    pairs   = [(i, j) for i in range(n) for j in range(i+1, n)]
-    scores  = [sim_matrix[i, j] for i, j in pairs]
+    pairs   = [(i, j) for i in range(n) for j in range(i+1, n) if sim_matrix[i, j] >= 0.2]
+    scores  = [sim_matrix[i, j] for i, j in pairs if sim_matrix[i, j] >= 0.2]
 
     samp_idx, corr = importance_sampling(scores, cascade_args)
+    print("sampidex:", len(samp_idx))
+    
     samp_pairs  = [pairs[k] for k in samp_idx]
+    print('sampairs:', len(samp_pairs))
     samp_scores = [scores[k] for k in samp_idx]
     samp_corr   = corr[samp_idx]
-
+    
     # ----- build LLM docs only for the sample -----
     docs = []
     for (i, j) in samp_pairs:
@@ -430,6 +438,9 @@ def learn_union_thresholds(sim_matrix: np.ndarray,
             cot, strategy)
         for d in docs
     ]
+    llm_call_count = len(samp_pairs)
+    print ("LLM calls:", llm_call_count)
+    #sys.exit()
 
     out = lotus.settings.lm(
         lm_prompts, show_progress_bar=True,
@@ -444,6 +455,8 @@ def learn_union_thresholds(sim_matrix: np.ndarray,
         cascade_args=cascade_args
     )
     return pos_threshold, neg_threshold
+
+
 
 from scipy.signal import argrelextrema
 from scipy.ndimage import gaussian_filter1d
@@ -706,7 +719,7 @@ def sem_union(
     sim_upper_threshold: float = 0.8,  # High similarity threshold
     sim_lower_threshold: float = 0.3,  # Low similarity threshold
     embedding_model: SentenceTransformer = None,
-    auto_threshold: bool = False,  # Whether to automatically determine thresholds
+    auto_threshold: str = "None",  # "None", "Valley", "Oracle"
 ) -> pd.DataFrame:
     """
     Implements a three-level semantic union operator with progressive matching strategies:
@@ -790,7 +803,7 @@ def sem_union(
             embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
     
     # Generate similarity matrix
-    similarity_matrix, _ = build_similarity_matrix(
+    similarity_matrix, _, dense_pairs, dense_scores = build_similarity_matrix(
         table1=combined_table,
         table2=None,  # Not used when is_stacked=True
         columns=columns1,  # Use all columns for comparison
@@ -803,7 +816,7 @@ def sem_union(
     print_similarity_stats(similarity_matrix)
 
     # Auto-determine thresholds if requested
-    if auto_threshold:
+    if auto_threshold == "Valley":
         # Extract upper triangle of similarity matrix (avoiding diagonal)
         similarity_scores = []
         for i in range(n_rows_total):
@@ -828,6 +841,12 @@ def sem_union(
             # Update the thresholds
             sim_lower_threshold = lower_threshold
             sim_upper_threshold = upper_threshold
+    elif auto_threshold == "Oracle":
+            # this is how you would call it when only limiting k = 50 closest neighbors to save LLM calls
+            #sim_upper_threshold, sim_lower_threshold = learn_union_thresholds(dense_scores, dense_pairs, combined_table, columns1, columns2, user_instruction, cascade_args)
+            sim_upper_threshold, sim_lower_threshold = learn_union_thresholds(similarity_matrix, dense_pairs, combined_table, columns1, columns2, user_instruction, cascade_args)
+
+            
     
     # Count similarity-based matches/non-matches
     high_sim_count = 0
