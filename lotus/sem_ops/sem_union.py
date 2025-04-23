@@ -1067,6 +1067,8 @@ class SemUnionDataFrame:
         sim_upper_threshold: float = 0.8,
         sim_lower_threshold: float = 0.3,
         embedding_model: SentenceTransformer = None,
+        auto_threshold: str = "None",
+        user_instruction: str = None,
     ) -> pd.DataFrame:
         """
         Applies sem_union between this DataFrame and another DataFrame/Series.
@@ -1081,7 +1083,7 @@ class SemUnionDataFrame:
             sim_upper_threshold (float): Similarity threshold above which rows are considered a match.
             sim_lower_threshold (float): Similarity threshold below which rows are considered not a match.
             embedding_model (SentenceTransformer): Model for creating embeddings.
-        
+            auto_threshold (str): choose from "None", "Valley", "Oracle". Not using auto_threshold will use the default thresholds.
         Returns:
             pd.DataFrame: A DataFrame containing the representative rows from each connected match group.
         """
@@ -1109,11 +1111,13 @@ class SemUnionDataFrame:
             raise ValueError("Both left and right columns must be specified in join_instruction for sem_union operator.")
         
         # Create a user instruction for row comparison.
-        user_instruction = (
-            f"Compare these two rows with the following columns and determine if they represent the same entity or information.\n\n"
-            f"Row 1 columns: {left_columns}\n"
-            f"Row 2 columns: {right_columns}\n\n"
-        )
+        if user_instruction is None:
+            user_instruction = (
+                f"Compare these two rows with the following columns and determine if they represent the same entity or information.\n\n"
+                f"Row 1 columns: {left_columns}\n"
+                f"Row 2 columns: {right_columns}\n\n"
+            )
+        
         result = sem_union(
             table1=self._obj,
             table2=other,
@@ -1125,5 +1129,6 @@ class SemUnionDataFrame:
             sim_upper_threshold=sim_upper_threshold,
             sim_lower_threshold=sim_lower_threshold,
             embedding_model=embedding_model,
+            auto_threshold=auto_threshold
         )
         return result
