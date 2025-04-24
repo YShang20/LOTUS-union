@@ -27,6 +27,7 @@ from .cascade_utils import importance_sampling, learn_cascade_thresholds
 
 from scipy.signal import argrelextrema
 from scipy.ndimage import gaussian_filter1d
+from sklearn.preprocessing import normalize
 
 def reps_from_graph(graph, df):
     visited, reps = set(), []
@@ -90,7 +91,7 @@ def detect_valley(
     prominences = pdf[minima]
     minima = minima[prominences < pdf.max() * (1 - valley_prominence)]
 
-    if minima.size == 0:            # unimodal → use defaults / quantiles
+    if minima.size == 0 :            # unimodal → use defaults / quantiles
         return default_lower, default_upper
     elif minima.size == 1:          # one clear valley
         t = (edges[minima[0]] + edges[minima[0] + 1]) / 2.0
@@ -155,17 +156,19 @@ def build_similarity_map(emb: np.ndarray,
     Return a dict {row_id: [(nbr_id, distance), …]}
     containing *k* neighbours per row (self‑match removed).
     """
-    idx = build_hnsw_index_dense(emb, space=space)
+    idx = build_hnsw_index_dense(emb, space=space, ef_construction= 500, M = 64)
     #labels, dists = idx.knn_query(emb, k=min(k, len(emb)))
-    labels, dists = idx.knn_query(emb, k=50)
+    labels, dists = idx.knn_query(emb, k=4589)
     sim_map = defaultdict(list)
 
     for i in range(len(labels)):
         for nbr, dist in zip(labels[i], dists[i]):
             if nbr == i:          # skip self
                 continue
-            sim_map[i].append((nbr, 1.0 - min(1.0, dist)))
+            sim_map[i].append((nbr, np.exp(-dist**2 / (2 * 0.5 **2))))
             
+    # norms = np.linalg.norm(emb, axis = 1, keepdims = True)
+    # normalized_emb = emb / norms
 
     return sim_map
 
@@ -258,54 +261,142 @@ def learn_union_thresholds_dense(
 from collections import defaultdict
 from typing import Dict, List, Tuple
 import pandas as pd
-
-# ░░░ 1.  Exact‑match as sparse map ░░░
 def exact_match_sparse(
-        table1: pd.DataFrame,
-        table2: pd.DataFrame | None = None,
-        columns1: List[str] | None = None,
-        columns2: List[str] | None = None,
-        is_stacked: bool = False
-) -> Dict[int, List[int]]:
+    table1: pd.DataFrame,
+    table2: pd.DataFrame,
+    columns1: List[str] = None,
+    columns2: List[str] = None,
+    is_stacked: bool = False,
+) -> np.ndarray:
     """
-    Return  {row_id : [exact‑match row_ids]}  without allocating an n×n matrix.
+    Implements an efficient exact-match algorithm using sort-merge join approach.
+    
+    Args:
+        table1 (pd.DataFrame): First table to compare
+        table2 (pd.DataFrame): Second table to compare
+        columns1 (List[str]): Columns from table1 to use for matching. If None, all columns are used.
+        columns2 (List[str]): Columns from table2 to use for matching. If None, uses columns1.
+        is_stacked (bool): If True, assumes table1 is already the stacked result of the two tables
+                          and table2 is ignored.
+    
+    Returns:
+        np.ndarray: An nxn boolean matrix where n is the total number of rows in the combined tables.
+                   Matrix[i,j] = 1 if rows i and j match exactly, 0 otherwise.
+                   Diagonal elements (i=j) are always 0.
     """
+    # Default to all columns if none specified
     if columns1 is None:
         columns1 = list(table1.columns)
     if columns2 is None:
         columns2 = columns1.copy()
-
-    # ── stack once ───────────────────────────────────────────────
-    if not is_stacked:
-        df_stacked = pd.concat([table1, table2], ignore_index=True)
-        n_rows_t1  = len(table1)
-    else:
-        df_stacked = table1
-        n_rows_t1  = len(table1) // 2
-
-    # ── build concatenated key for every row ─────────────────────
-    def make_key(idx, row):
-        cols = columns1 if idx < n_rows_t1 else columns2
-        return "|".join(str(row[c]) for c in cols)
-
-    keys = df_stacked.apply(lambda r: make_key(r.name, r), axis=1)
-    df_stacked["_k"] = keys
-
-    # ── group identical keys → exact matches ─────────────────────
-    groups = df_stacked.groupby("_k").indices
     match_map: Dict[int, List[int]] = defaultdict(list)
+    # Validate column existence
+    for col in columns1:
+        if col not in table1.columns:
+            raise ValueError(f"Column '{col}' not found in table1")
+    
+    if not is_stacked:
+        for col in columns2:
+            if col not in table2.columns:
+                raise ValueError(f"Column '{col}' not found in table2")
+        
+        # Stack the tables
+        df_stacked = pd.concat([table1, table2], ignore_index=True)
+        n_rows_t1 = len(table1)
+    else:
+        # If already stacked, just use table1
+        df_stacked = table1
+        n_rows_t1 = len(table1) // 2
+    
+    # Create concatenated strings for sorting
+    concat_values = []
+    for idx, row in df_stacked.iterrows():
+        # Determine which set of columns to use based on whether the row came from table1 or table2
+        cols = columns1 if idx < n_rows_t1 else columns2
+        # Convert row values to strings and concatenate
+        row_str = "|".join(str(row[col]) for col in cols)
+        concat_values.append(row_str)
+    
+    df_stacked['_concat_key'] = concat_values
+    
+    # Sort by the concatenated string
+    df_sorted = df_stacked.sort_values('_concat_key')
+    sorted_indices = df_sorted.index.values
+    
+    # Initialize result matrix (n x n) with zeros
+    n = len(df_stacked)
+    
+    
+    # Iterate through sorted data to find matching rows efficiently
+    i = 0
+    while i < len(df_sorted) - 1:
+        j = i + 1
+        # Check if current row matches the next row
+        while j < len(df_sorted) and df_sorted.iloc[i]['_concat_key'] == df_sorted.iloc[j]['_concat_key']:
+            # Get original indices
+            orig_i = sorted_indices[i]
+            orig_j = sorted_indices[j]
+            # Set match in result matrix (1 for match)
+            match_map[orig_i].append(orig_j)
+            #match_map[orig_j].append(orig_i)
+            j += 1
+        i += 1
+    
+    # Ensure diagonal is 0 (no self-matches)
+    
+    
+    # Delete the temporary concat key column
+    if '_concat_key' in df_stacked.columns:
+        df_stacked.drop('_concat_key', axis=1, inplace=True)
+    
+    return match_map
+# ░░░ 1.  Exact‑match as sparse map ░░░
+# def exact_match_sparse(
+#         table1: pd.DataFrame,
+#         table2: pd.DataFrame | None = None,
+#         columns1: List[str] | None = None,
+#         columns2: List[str] | None = None,
+#         is_stacked: bool = False
+# ) -> Dict[int, List[int]]:
+#     """
+#     Return  {row_id : [exact‑match row_ids]}  without allocating an n×n matrix.
+#     """
+#     if columns1 is None:
+#         columns1 = list(table1.columns)
+#     if columns2 is None:
+#         columns2 = columns1.copy()
 
-    for idx_list in groups.values():
-        idx_list = list(idx_list)
-        if len(idx_list) < 2:
-            continue
-        for i in idx_list:
-            for j in idx_list:
-                if i != j:
-                    match_map[i].append(j)
+#     # ── stack once ───────────────────────────────────────────────
+#     if not is_stacked:
+#         df_stacked = pd.concat([table1, table2], ignore_index=True)
+#         n_rows_t1  = len(table1)
+#     else:
+#         df_stacked = table1
+#         n_rows_t1  = len(table1) // 2
 
-    df_stacked.drop(columns=["_k"], inplace=True)
-    return match_map           # Dict[int, List[int]]
+#     # ── build concatenated key for every row ─────────────────────
+#     def make_key(idx, row):
+#         cols = columns1 if idx < n_rows_t1 else columns2
+#         return "|".join(str(row[c]) for c in cols)
+
+#     keys = df_stacked.apply(lambda r: make_key(r.name, r), axis=1)
+#     df_stacked["_k"] = keys
+
+#     # ── group identical keys → exact matches ─────────────────────
+#     groups = df_stacked.groupby("_k").indices
+#     match_map: Dict[int, List[int]] = defaultdict(list)
+
+#     for idx_list in groups.values():
+#         idx_list = list(idx_list)
+#         if len(idx_list) < 2:
+#             continue
+#         for i in idx_list:
+#             for j in idx_list:
+#                 if i != j:
+#                     match_map[i].append(j)
+
+#     df_stacked.drop(columns=["_k"], inplace=True)
+#     return match_map           # Dict[int, List[int]]
 
 
 
@@ -435,12 +526,13 @@ def sem_union(
     if show_progress_bar:
         print("[∪] Step 1 – exact string match …")
     exact_map = exact_match_sparse(
-        combined,
+        table1 = combined,
+        table2 = None,
         columns1=columns1,
         columns2=columns2,
         is_stacked=True
     )
-    exact_pairs = sum(len(v) for v in exact_map.values()) // 2
+    exact_pairs = sum(len(v) for v in exact_map.values()) 
     if show_progress_bar:
         print(f"    ↳ {exact_pairs:,} exact‑match pairs")
         print(f"    ↳ Exact match map size: {len(exact_map)} keys")
@@ -458,10 +550,11 @@ def sem_union(
     texts = combined[columns1].astype(str).agg(" | ".join, axis=1).tolist()
     print(f"    ↳ Total text entries: {len(texts)}")
     combined_compressed = combined.apply(
-    lambda row: " | ".join([f"{col}: {row[col]}" for col in columns1 if pd.notna(row[col])]),
+    lambda row: " ".join([str(row[col]) for col in columns1 if pd.notna(row[col])]),
     axis=1).tolist()
     #emb = compute_embedding(combined)
     emb = embedding_model._embed(combined_compressed)
+    emb = normalize(emb, norm = 'l2', axis = 1)
     print(f"    ↳ Embeddings shape: {emb.shape}, approx memory: {emb.data.nbytes / 1024**2:.2f} MB")
 
     neighbor_map = build_similarity_map(emb, k=k_neighbors)
@@ -479,7 +572,8 @@ def sem_union(
             similarity_scores = []
             for i in range(len(neighbor_map)):
                 for j, sim_score in  neighbor_map[i]:  # Skip if already matched exactly
-                    if j not in exact_map[i]  and sim_score > 0.1:
+                    if j not in exact_map[i]  and j > i and sim_score > 0.1:
+                        print("record ", i, " neighbor", j, "score:", sim_score)
                         similarity_scores.append(sim_score)
                         
             if len(similarity_scores) > 10:

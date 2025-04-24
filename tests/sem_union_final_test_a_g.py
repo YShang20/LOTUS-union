@@ -17,7 +17,7 @@ lm = LM(model="gpt-4o-mini",
         max_batch_size=64)
 
 # Configure retrieval model for embeddings
-rm = SentenceTransformersRM(model="all-MiniLM-L6-v2")
+rm = SentenceTransformersRM(model="all-MiniLM-L12-v2")
 
 lotus.settings.configure(lm=lm)
 
@@ -38,7 +38,7 @@ lotus.settings.configure(lm=lm)
 df_left = pd.read_csv('Amazon-GoogleProducts/Amazon.csv', encoding='ISO-8859-1',quotechar='"', escapechar='\\')
 df_right = pd.read_csv('/Users/yolandazhou/Documents/untitled_folder/CSE_584/lotus/Amazon-GoogleProducts/GoogleProducts.csv', encoding='ISO-8859-1',quotechar='"', escapechar='\\')
 
-#df_right = df_right.rename(columns={"name": "title"})
+df_right = df_right.rename(columns={"name": "title"})
 
 print(f"Amazon dataset shape: {df_left.shape}")
 print(f"Google dataset shape: {df_right.shape}")
@@ -59,12 +59,12 @@ user_instruction = (
 result_df = sem_union(
     table1=df_left,
     table2=df_right,
-    columns1=["title", "description", "manufacturer", 'price'],
-    columns2=["title", "description", "manufacturer", 'price'],
+    columns1=["title", "description", "manufacturer"],
+    columns2=["title", "description", "manufacturer"],
     user_instruction=user_instruction,
-    k_neighbors= 50,
+    k_neighbors= 4550,
     run_llm=False,
-    auto_threshold="Oracle",
+    auto_threshold="Valley",
     embedding_model=rm,  # Pass the embedding model directly
     safe_mode=False,
     show_progress_bar=True
