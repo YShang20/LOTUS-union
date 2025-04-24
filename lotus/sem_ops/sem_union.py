@@ -401,11 +401,11 @@ def exact_match_sparse(
 
 
 def llm_union_sparse(
-        neighbor_map:  Dict[int, List[tuple[int, float]]],
-        combined: List[str],
+        undecided_pairs : list[tuple[int, int]],
         user_instruction: str,
         *,
-        exact_match_map: Dict[int, List[int]],
+        graph:  Dict[int, Set[int]],
+        combined : list[str],
         default: bool = True,
         examples_multimodal_data: list[dict[str, Any]] | None = None,
         examples_answers: List[bool] | None = None,
@@ -423,17 +423,11 @@ def llm_union_sparse(
     """
    
 
-    # ── 1.  build adjacency from exact matches ───────────────────
-    graph: Dict[int, Set[int]] = defaultdict(set)
-    for i, lst in exact_match_map.items():
-        for j in lst:
-            graph[i].add(j)
-            graph[j].add(i)
+   
 
     # ── 2.  decide remaining pairs with the LLM  (only i<j) ──────
     docs, mapping = [], []
-    for i in range(len(neighbor_map)):
-        for j , sim_score in neighbor_map[i]:
+    for i , j in (undecided_pairs):
             if j in graph[i]:              # already matched
                 continue
             row1 = combined[i]
@@ -573,7 +567,6 @@ def sem_union(
             for i in range(len(neighbor_map)):
                 for j, sim_score in  neighbor_map[i]:  # Skip if already matched exactly
                     if j not in exact_map[i]  and j > i and sim_score > 0.1:
-                        print("record ", i, " neighbor", j, "score:", sim_score)
                         similarity_scores.append(sim_score)
                         
             if len(similarity_scores) > 10:
@@ -643,6 +636,25 @@ def sem_union(
             else:
                 undecided.append((i, j))
 
+    # candidate_pairs = []
+    # def similarity():
+    #     return 1
+    # def LLM_decision():
+    #     return 1
+    # lower_bound = 0
+    # upper_bound = 0
+
+    # for (i, j) in candidate_pairs:
+    #     sim_score = similarity(i, j)
+
+    #     if sim_score >= upper_bound:
+    #         graph.add_edge(i, j)  # High confidence match
+    #     elif lower_bound <= sim_score < upper_bound:
+    #         if LLM_decision(i, j) == True:
+    #             graph.add_edge(i, j)  # Confirmed by LLM
+    #     else:
+    #         continue  # Rejected
+
     if show_progress_bar:
         print(f"    ↳ High sim: {hi_cnt}, Low sim: {lo_cnt}, Undecided: {len(undecided)}")
         print(f"    ↳ Graph now has {len(graph)} nodes")
@@ -653,10 +665,10 @@ def sem_union(
             print("[∪] Step 3 – LLM on undecided pairs …")
 
         result_df = llm_union_sparse(
-            neighbor_map=neighbor_map,
-            combined= combined_compressed,
+            undecided_pairs = undecided,
             user_instruction=user_instruction,
-            exact_match_map=graph,
+            graph=graph,
+            combined = combined_compressed,
             default=default,
             examples_multimodal_data=examples_multimodal_data,
             examples_answers=examples_answers,
@@ -678,3 +690,4 @@ def sem_union(
     print(f"[∪] Final representative rows: {len(result_df)}")
 
     return result_df
+
