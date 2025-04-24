@@ -12,33 +12,20 @@ from lotus.sem_ops.sem_union import sem_union
 
 # Configure models for LOTUS
 lm = LM(model="gpt-4o-mini",
-        temperature=1,
+        temperature=0,
         num_retries=3,
-        max_batch_size=64)
+        max_batch_size=64,
+        max_tokens=2000)
 
 # Configure retrieval model for embeddings
 rm = SentenceTransformersRM(model="all-MiniLM-L12-v2")
 
 lotus.settings.configure(lm=lm)
 
-# # Comment out the old dataset loading part
-# # Load the labeled data
-# file_path = "/Users/shangyuntao/Downloads/labeled_data-2.csv"
-# df = pd.read_csv(file_path, comment='#')
-# 
-# # Drop the last column (label)
-# df = df.iloc[:, :-1]
-# 
-# # Separate into left (L) and right (R) tables based on column prefixes
-# left_columns = [col for col in df.columns if col.startswith('ltable.')]
-# right_columns = [col for col in df.columns if col.startswith('rtable.')]
-# 
-# df_left = df[left_columns].rename(columns=lambda x: x.replace('ltable.', ''))
-# df_right = df[right_columns].rename(columns=lambda x: x.replace('rtable.', ''))
 
 # Load the Amazon-GoogleProducts datasets
-amazon_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/Amazon.csv"
-google_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/GoogleProducts.csv"
+amazon_path = "Amazon-GoogleProducts/Amazon.csv"
+google_path = "Amazon-GoogleProducts/GoogleProducts.csv"
 
 df_left = pd.read_csv(amazon_path, encoding='ISO-8859-1',quotechar='"', escapechar='\\')
 df_right = pd.read_csv(google_path, encoding='ISO-8859-1',quotechar='"', escapechar='\\')
@@ -53,7 +40,7 @@ print("Google dataset columns:", df_right.columns.tolist())
 
 # Define user instruction
 user_instruction = (
-            f"Compare the above two rows with the following column names and determine if they represent the same entity or information.\n\n"
+            f"Compare the above two representing books with the following column names and determine if they represent the same book.\n\n"
             f"Row 1 columns: {"title", "description", "manufacturer"}\n"
             f"Row 2 columns: {"title", "description", "manufacturer"}\n\n"
         )
@@ -65,22 +52,22 @@ result_df = sem_union(
     columns1=["title", "description", "manufacturer"],
     columns2=["title", "description", "manufacturer"],
     user_instruction=user_instruction,
-    sim_upper_threshold=0.9, 
-    sim_lower_threshold=0.35, 
+    k_neighbors= len(df_left) + len(df_right),
     embedding_model=rm,  # Pass the embedding model directly
     safe_mode=False,
-    show_progress_bar=True
+    show_progress_bar=True,
+    auto_threshold="Valley"
 )
 
 # Save results
-result_df.to_csv("/Users/shangyuntao/Downloads/lotus-main/union_test_results/amazon_google_sem_union_results.csv", index=False)
+result_df.to_csv("union_test_results/amazon_google_sem_union_results.csv", index=False)
 
 # Evaluation with processed_result_3290.csv
 print("\nEvaluating accuracy using processed_result_3290.csv")
 
 try:
     # Load ground truth data
-    ground_truth = pd.read_csv("/Users/shangyuntao/Downloads/lotus-main/processed_result_3290.csv")
+    ground_truth = pd.read_csv("processed_result_3290.csv")
     
     # Count unique product records in ground truth
     unique_ground_truth = len(ground_truth)
@@ -106,18 +93,7 @@ try:
         if our_id in gt_unified_ids:
             matched_records += 1
             continue
-        
-        # If no direct match found, try to clean and match the IDs
-        # For URLs in Google dataset, extract the ID portion
-        # if our_id.startswith('http'):
-        #     # Extract the last part of the URL
-        #     parts = our_id.split('/')
-        #     if parts and len(parts) > 0:
-        #         clean_id = parts[-1]
-        #         if clean_id in gt_unified_ids:
-        #             matched_records += 1
-        #             continue
-    
+
     # Calculate metrics
     true_positives = matched_records  # Records we correctly found
     false_positives = unique_results - matched_records  # Records in our results that don't match ground truth

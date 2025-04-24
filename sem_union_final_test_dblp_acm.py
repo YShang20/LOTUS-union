@@ -22,8 +22,8 @@ rm = SentenceTransformersRM(model="all-MiniLM-L12-v2")
 lotus.settings.configure(lm=lm)
 
 # Load the DBLP-ACM datasets
-dblp_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/DBLP2.csv"
-acm_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/ACM.csv"
+dblp_path = "Amazon-GoogleProducts/DBLP2.csv"
+acm_path = "Amazon-GoogleProducts/ACM.csv"
 
 df_dblp = pd.read_csv(dblp_path, encoding='ISO-8859-1', quotechar='"', escapechar='\\')
 df_acm = pd.read_csv(acm_path, encoding='ISO-8859-1', quotechar='"', escapechar='\\')
@@ -52,20 +52,20 @@ result_df = sem_union(
     embedding_model=rm,  # Pass the embedding model directly
     safe_mode=False,
     show_progress_bar=True,
-    sim_upper_threshold=0.5, 
-    sim_lower_threshold=0.5, 
-    auto_threshold="Oracle"
+    k_neighbors= len(df_dblp) + len(df_acm),
+    auto_threshold="Valley"
     )
 
+
 # Save results
-result_df.to_csv("/Users/shangyuntao/Downloads/lotus-main/union_test_results/dblp_acm_sem_union_results.csv", index=False)
+result_df.to_csv("union_test_results/dblp_acm_sem_union_results.csv", index=False)
 
 # Evaluation with processed ground truth
 print("\nEvaluating accuracy using processed_dblp_acm_ground_truth.csv")
 
 try:
     # Load ground truth data
-    ground_truth_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/processed_dblp_acm_ground_truth.csv"
+    ground_truth_path = "Amazon-GoogleProducts/processed_dblp_acm_ground_truth.csv"
     ground_truth = pd.read_csv(ground_truth_path)
     
     # Count unique paper records in ground truth

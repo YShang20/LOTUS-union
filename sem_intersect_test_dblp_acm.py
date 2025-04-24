@@ -22,9 +22,9 @@ rm = SentenceTransformersRM(model="all-MiniLM-L12-v2")
 lotus.settings.configure(lm=lm)
 
 # Load the DBLP-ACM datasets
-dblp_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/DBLP2.csv"
-acm_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/ACM.csv"
-mapping_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/DBLP-ACM_perfectMapping.csv"
+dblp_path = "Amazon-GoogleProducts/DBLP2.csv"
+acm_path = "Amazon-GoogleProducts/ACM.csv"
+mapping_path = "Amazon-GoogleProducts/DBLP-ACM_perfectMapping.csv"
 
 df_dblp = pd.read_csv(dblp_path, encoding='ISO-8859-1', quotechar='"', escapechar='\\')
 df_acm = pd.read_csv(acm_path, encoding='ISO-8859-1', quotechar='"', escapechar='\\')
@@ -68,7 +68,7 @@ result_df = sem_intersect(
 )
 
 # Save results
-result_df.to_csv("/Users/shangyuntao/Downloads/lotus-main/intersect_test_results/dblp_acm_sem_intersect_results.csv", index=False)
+result_df.to_csv("intersect_test_results/dblp_acm_sem_intersect_results.csv", index=False)
 
 # Evaluation
 print("\nEvaluating accuracy using perfect mapping ground truth")

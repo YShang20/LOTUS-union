@@ -22,7 +22,7 @@ rm = SentenceTransformersRM(model="all-MiniLM-L6-v2")
 lotus.settings.configure(lm=lm)
 
 # Load the labeled data
-file_path = "/Users/shangyuntao/Downloads/labeled_data-2.csv"
+file_path = "labeled_data-2.csv"
 df = pd.read_csv(file_path, comment='#')
 
 # Drop the last column (label)
@@ -63,8 +63,7 @@ result_df = sem_union(
     columns1=columns,
     columns2=columns,
     user_instruction=user_instruction,
-    sim_upper_threshold=0.6, 
-    sim_lower_threshold=0.6, 
+    k_neighbors= len(df_left) + len(df_right),
     embedding_model=rm,  # Pass the embedding model directly
     safe_mode=False,
     show_progress_bar=True,
@@ -72,14 +71,14 @@ result_df = sem_union(
 )
 
 # Save results
-result_df.to_csv("/Users/shangyuntao/Downloads/lotus-main/union_test_results/layered_sem_union_results.csv", index=False)
+result_df.to_csv("union_test_results/layered_sem_union_results.csv", index=False)
 
 # Evaluation with processed_result_400.csv
 print("\nEvaluating accuracy using processed_result_400.csv")
 
 try:
     # Load ground truth data
-    ground_truth = pd.read_csv("/Users/shangyuntao/Downloads/lotus-main/processed_result_400.csv")
+    ground_truth = pd.read_csv("processed_result_400.csv")
     
     # Count unique book records in ground truth
     unique_ground_truth = len(ground_truth)

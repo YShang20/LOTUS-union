@@ -22,9 +22,9 @@ rm = SentenceTransformersRM(model="all-MiniLM-L12-v2")
 lotus.settings.configure(lm=lm)
 
 # Load the Amazon-GoogleProducts datasets
-amazon_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/Amazon.csv"
-google_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/GoogleProducts.csv"
-mapping_path = "/Users/shangyuntao/Downloads/lotus-main/Amazon-GoogleProducts/Amzon_GoogleProducts_perfectMapping.csv"
+amazon_path = "Amazon-GoogleProducts/Amazon.csv"
+google_path = "Amazon-GoogleProducts/GoogleProducts.csv"
+mapping_path = "Amazon-GoogleProducts/Amzon_GoogleProducts_perfectMapping.csv"
 
 df_left = pd.read_csv(amazon_path, encoding='ISO-8859-1', quotechar='"', escapechar='\\')
 df_right = pd.read_csv(google_path, encoding='ISO-8859-1', quotechar='"', escapechar='\\')
@@ -70,7 +70,7 @@ result_df = sem_intersect(
 )
 
 # Save results
-result_df.to_csv("/Users/shangyuntao/Downloads/lotus-main/intersect_test_results/amazon_google_sem_intersect_results.csv", index=False)
+result_df.to_csv("intersect_test_results/amazon_google_sem_intersect_results.csv", index=False)
 
 # Evaluation
 print("\nEvaluating accuracy using perfect mapping ground truth")
